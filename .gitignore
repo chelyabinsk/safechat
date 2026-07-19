@@ -1,0 +1,16 @@
+# Git metadata for the nested workspace repository.
+codebase/.git/
+
+# Rust build output.
+codebase/target/
+codebase/key.txt
+codebase/*.key
+codebase/message.txt
+codebase/encoded.png
+codebase/recovered.txt
+codebase/message-benchmark.txt
+codebase/encoded-benchmark.png
+
+# Editor and OS files.
+.DS_Store
+.vscode/

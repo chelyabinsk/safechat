@@ -1,0 +1,13 @@
+services:
+  rust-dev:
+    build:
+      context: .
+      args:
+        USER_UID: ${UID:-1000}
+        USER_GID: ${GID:-1000}
+    image: safechat-rust-dev:latest
+    working_dir: /workspace
+    volumes:
+      - ./codebase:/workspace
+    stdin_open: true
+    tty: true
