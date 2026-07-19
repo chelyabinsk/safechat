@@ -94,6 +94,17 @@ The experimental blind baseline uses only the candidate image:
 
 The threshold is not calibrated for production use. In the current experiment, the tiny 47-byte payload was not flagged, while a 520-byte payload was flagged. This is a development benchmark for finding the embedding method's operating boundary.
 
+The corpus benchmark fits a threshold over clean and encoded directories:
+
+```sh
+./codebase/target/release/safechat benchmark \
+  --clean-dir /path/to/clean-pngs \
+  --encoded-dir /path/to/encoded-pngs \
+  --window-bits 512
+```
+
+Its accuracy is only meaningful with a representative corpus and disjoint evaluation data. The current local result uses two clean and two encoded samples and is therefore exploratory only.
+
 The key file and message/carrier files are in `codebase/` on the host because Docker mounts that directory at `/workspace`. This MVP intentionally supports PNG only; GIF, audio, video, richer key exchange, and error correction are future adapters/features.
 
 The sample application lives in `codebase/`. That directory is mounted at `/workspace`, so its Rust source files are available on the host at `codebase/src/main.rs` and can be edited there. Set `UID` and `GID` when building through Compose if the host user is not `1000`:

@@ -96,6 +96,14 @@ enum Command {
         #[arg(long, default_value_t = 0.05)]
         threshold: f64,
     },
+    Benchmark {
+        #[arg(long)]
+        clean_dir: PathBuf,
+        #[arg(long)]
+        encoded_dir: PathBuf,
+        #[arg(long, default_value_t = 1024)]
+        window_bits: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -147,6 +155,11 @@ fn main() -> Result<()> {
             window_bits,
             threshold,
         } => blind_detect(&input, window_bits, threshold),
+        Command::Benchmark {
+            clean_dir,
+            encoded_dir,
+            window_bits,
+        } => benchmark(&clean_dir, &encoded_dir, window_bits),
     }
 }
 
@@ -781,6 +794,142 @@ fn blind_detect(input: &PathBuf, window_bits: usize, threshold: f64) -> Result<(
             "not flagged by this baseline"
         }
     );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BenchmarkSample {
+    score: f64,
+    encoded: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Confusion {
+    true_positive: usize,
+    false_positive: usize,
+    true_negative: usize,
+    false_negative: usize,
+}
+
+impl Confusion {
+    fn accuracy(self) -> f64 {
+        let total =
+            self.true_positive + self.false_positive + self.true_negative + self.false_negative;
+        if total == 0 {
+            0.0
+        } else {
+            (self.true_positive + self.true_negative) as f64 / total as f64
+        }
+    }
+
+    fn false_positive_rate(self) -> f64 {
+        let denominator = self.false_positive + self.true_negative;
+        if denominator == 0 {
+            0.0
+        } else {
+            self.false_positive as f64 / denominator as f64
+        }
+    }
+
+    fn false_negative_rate(self) -> f64 {
+        let denominator = self.false_negative + self.true_positive;
+        if denominator == 0 {
+            0.0
+        } else {
+            self.false_negative as f64 / denominator as f64
+        }
+    }
+}
+
+fn png_paths(dir: &PathBuf) -> Result<Vec<PathBuf>> {
+    let mut paths = fs::read_dir(dir)
+        .with_context(|| format!("reading benchmark directory {}", dir.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+fn classify(samples: &[BenchmarkSample], threshold: f64) -> Confusion {
+    samples
+        .iter()
+        .fold(Confusion::default(), |mut result, sample| {
+            let predicted_encoded = sample.score >= threshold;
+            match (sample.encoded, predicted_encoded) {
+                (true, true) => result.true_positive += 1,
+                (false, true) => result.false_positive += 1,
+                (false, false) => result.true_negative += 1,
+                (true, false) => result.false_negative += 1,
+            }
+            result
+        })
+}
+
+fn benchmark(clean_dir: &PathBuf, encoded_dir: &PathBuf, window_bits: usize) -> Result<()> {
+    let clean_paths = png_paths(clean_dir)?;
+    let encoded_paths = png_paths(encoded_dir)?;
+    if clean_paths.is_empty() || encoded_paths.is_empty() {
+        bail!("benchmark requires at least one clean and one encoded PNG");
+    }
+
+    let mut samples = Vec::with_capacity(clean_paths.len() + encoded_paths.len());
+    for path in clean_paths {
+        let image = read_png(&path)?;
+        samples.push(BenchmarkSample {
+            score: blind_features(&image, window_bits)?.score,
+            encoded: false,
+        });
+    }
+    for path in encoded_paths {
+        let image = read_png(&path)?;
+        samples.push(BenchmarkSample {
+            score: blind_features(&image, window_bits)?.score,
+            encoded: true,
+        });
+    }
+
+    let mut thresholds = samples
+        .iter()
+        .map(|sample| sample.score)
+        .collect::<Vec<_>>();
+    thresholds.sort_by(f64::total_cmp);
+    thresholds.dedup_by(|left, right| left == right);
+    let mut best_threshold = thresholds[0];
+    let mut best = classify(&samples, best_threshold);
+    for threshold in thresholds {
+        let current = classify(&samples, threshold);
+        if current.accuracy() > best.accuracy()
+            || (current.accuracy() == best.accuracy()
+                && current.false_positive_rate() < best.false_positive_rate())
+        {
+            best_threshold = threshold;
+            best = current;
+        }
+    }
+
+    println!(
+        "clean samples: {}",
+        samples.iter().filter(|sample| !sample.encoded).count()
+    );
+    println!(
+        "encoded samples: {}",
+        samples.iter().filter(|sample| sample.encoded).count()
+    );
+    println!("window bits: {window_bits}");
+    println!("best corpus threshold: {best_threshold:.6}");
+    println!("accuracy: {:.4}", best.accuracy());
+    println!("false-positive rate: {:.4}", best.false_positive_rate());
+    println!("false-negative rate: {:.4}", best.false_negative_rate());
+    println!("true positives: {}", best.true_positive);
+    println!("false positives: {}", best.false_positive);
+    println!("true negatives: {}", best.true_negative);
+    println!("false negatives: {}", best.false_negative);
+    println!("warning: threshold is fitted and evaluated on the same corpus");
     Ok(())
 }
 
