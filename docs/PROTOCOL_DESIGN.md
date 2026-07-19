@@ -128,7 +128,7 @@ Rules:
 
 The first release should ship a small number of fully tested suites. The MVP supports symmetric ChaCha20-Poly1305 and hybrid X25519/ChaCha20-Poly1305 recipient encryption. Algorithm agility must not become an untested collection of combinations.
 
-Public-key mode stores the sender's ephemeral X25519 public key in the envelope. The recipient uses its private key to derive the per-message AEAD key. This mode provides recipient confidentiality but does not authenticate the sender; a future signed-identity mode must add sender signatures and trusted identity-key verification rather than assuming that encryption proves authorship.
+Public-key mode stores the sender's ephemeral X25519 public key and long-term Ed25519 identity public key in the envelope. The recipient uses its private key to derive the per-message AEAD key. The sender signs the protocol fields, recipient binding, nonce, and ciphertext with the identity key. The recipient must compare the embedded identity key with a trusted public key provisioned through the user-managed out-of-band channel before accepting the signature. Encryption alone never proves authorship.
 
 ## 6. Length, padding, and metadata leakage
 

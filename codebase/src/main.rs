@@ -5,6 +5,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use clap::{Parser, Subcommand};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use png::{BitDepth, ColorType, Decoder, Encoder, Transformations};
@@ -13,21 +14,30 @@ use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf};
 use x25519_dalek::{PublicKey, StaticSecret};
 
+mod carrier;
+mod transport;
+
+use carrier::{CarrierAdapter, PngCarrier, RgbaImage};
+use transport::TextTransport;
+
 type HmacSha256 = Hmac<Sha256>;
 
 const VERSION: u8 = 1;
 const SUITE_CHACHA20_POLY1305: u8 = 1;
-const SUITE_X25519_CHACHA20_POLY1305: u8 = 2;
+const SUITE_X25519_CHACHA20_POLY1305_AUTHENTICATED: u8 = 3;
 const LOCATOR_LEN: usize = 16;
 const CONTEXT_HASH_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const HEADER_LEN: usize = 1 + 1 + CONTEXT_HASH_LEN + NONCE_LEN + 4;
 const PUBLIC_KEY_LEN: usize = 32;
+const IDENTITY_KEY_LEN: usize = 32;
+const SIGNATURE_LEN: usize = 64;
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum EncryptionMode {
     Symmetric,
     Public,
+    Identity,
 }
 
 #[derive(Parser)]
@@ -63,6 +73,8 @@ enum Command {
         mode: EncryptionMode,
         #[arg(long)]
         recipient_public_key: Option<PathBuf>,
+        #[arg(long)]
+        sender_private_key: Option<PathBuf>,
         #[arg(long, default_value = "")]
         context: String,
     },
@@ -77,6 +89,40 @@ enum Command {
         mode: EncryptionMode,
         #[arg(long)]
         private_key: Option<PathBuf>,
+        #[arg(long)]
+        trusted_sender_public_key: Option<PathBuf>,
+        #[arg(long, default_value = "")]
+        context: String,
+    },
+    TextEncode {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = EncryptionMode::Symmetric)]
+        mode: EncryptionMode,
+        #[arg(long)]
+        recipient_public_key: Option<PathBuf>,
+        #[arg(long)]
+        sender_private_key: Option<PathBuf>,
+        #[arg(long, default_value = "")]
+        context: String,
+    },
+    TextDecode {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = EncryptionMode::Symmetric)]
+        mode: EncryptionMode,
+        #[arg(long)]
+        private_key: Option<PathBuf>,
+        #[arg(long)]
+        trusted_sender_public_key: Option<PathBuf>,
         #[arg(long, default_value = "")]
         context: String,
     },
@@ -120,6 +166,7 @@ fn main() -> Result<()> {
             key,
             mode,
             recipient_public_key,
+            sender_private_key,
             context,
         } => encode(
             &input,
@@ -128,6 +175,7 @@ fn main() -> Result<()> {
             key.as_ref(),
             mode,
             recipient_public_key.as_ref(),
+            sender_private_key.as_ref(),
             &context,
         ),
         Command::Decode {
@@ -136,6 +184,7 @@ fn main() -> Result<()> {
             key,
             mode,
             private_key,
+            trusted_sender_public_key,
             context,
         } => decode(
             &input,
@@ -143,6 +192,41 @@ fn main() -> Result<()> {
             key.as_ref(),
             mode,
             private_key.as_ref(),
+            trusted_sender_public_key.as_ref(),
+            &context,
+        ),
+        Command::TextEncode {
+            input,
+            output,
+            key,
+            mode,
+            recipient_public_key,
+            sender_private_key,
+            context,
+        } => text_encode(
+            &input,
+            &output,
+            key.as_ref(),
+            mode,
+            recipient_public_key.as_ref(),
+            sender_private_key.as_ref(),
+            &context,
+        ),
+        Command::TextDecode {
+            input,
+            output,
+            key,
+            mode,
+            private_key,
+            trusted_sender_public_key,
+            context,
+        } => text_decode(
+            &input,
+            &output,
+            key.as_ref(),
+            mode,
+            private_key.as_ref(),
+            trusted_sender_public_key.as_ref(),
             &context,
         ),
         Command::Inspect { input } => inspect(&input),
@@ -194,6 +278,17 @@ fn keygen(path: &PathBuf, mode: EncryptionMode, public_output: Option<&PathBuf>)
             write_secret_file(public_path, "safechat-public-v1", public.as_bytes())?;
             println!("generated public key: {}", public_path.display());
         }
+        EncryptionMode::Identity => {
+            let public_path = public_output.context("identity mode requires --public-output")?;
+            let signing_key = SigningKey::from_bytes(&key);
+            write_secret_file(path, "safechat-identity-private-v1", &key)?;
+            write_secret_file(
+                public_path,
+                "safechat-identity-public-v1",
+                signing_key.verifying_key().as_bytes(),
+            )?;
+            println!("generated identity public key: {}", public_path.display());
+        }
     }
     println!("generated key: {}", path.display());
     Ok(())
@@ -227,6 +322,14 @@ fn load_private_key(path: &PathBuf) -> Result<[u8; 32]> {
 
 fn load_public_key(path: &PathBuf) -> Result<[u8; 32]> {
     load_material(path, "safechat-public-v1:")
+}
+
+fn load_identity_private_key(path: &PathBuf) -> Result<[u8; IDENTITY_KEY_LEN]> {
+    load_material(path, "safechat-identity-private-v1:")
+}
+
+fn load_identity_public_key(path: &PathBuf) -> Result<[u8; IDENTITY_KEY_LEN]> {
+    load_material(path, "safechat-identity-public-v1:")
 }
 
 fn context_hash(context: &str) -> [u8; CONTEXT_HASH_LEN] {
@@ -311,9 +414,44 @@ fn derive_public_mode_key(
     key
 }
 
+#[allow(clippy::too_many_arguments)]
+fn public_signature_message(
+    version: u8,
+    suite: u8,
+    context_hash: &[u8; CONTEXT_HASH_LEN],
+    ephemeral_public: &[u8; PUBLIC_KEY_LEN],
+    sender_identity_public: &[u8; IDENTITY_KEY_LEN],
+    recipient_public: &[u8; PUBLIC_KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    ciphertext: &[u8],
+) -> Vec<u8> {
+    let length = (ciphertext.len() as u32).to_be_bytes();
+    let mut message = Vec::with_capacity(
+        32 + 2
+            + CONTEXT_HASH_LEN
+            + PUBLIC_KEY_LEN
+            + IDENTITY_KEY_LEN
+            + PUBLIC_KEY_LEN
+            + NONCE_LEN
+            + 4
+            + ciphertext.len(),
+    );
+    message.extend(b"safechat/public-auth/v1");
+    message.extend([version, suite]);
+    message.extend(context_hash);
+    message.extend(ephemeral_public);
+    message.extend(sender_identity_public);
+    message.extend(recipient_public);
+    message.extend(nonce);
+    message.extend(length);
+    message.extend(ciphertext);
+    message
+}
+
 fn make_public_envelope(
     plaintext: &[u8],
     recipient_public: &[u8; PUBLIC_KEY_LEN],
+    sender_identity_private: &[u8; IDENTITY_KEY_LEN],
     context: &str,
 ) -> Result<Vec<u8>> {
     let context_hash = context_hash(context);
@@ -328,6 +466,8 @@ fn make_public_envelope(
         ephemeral_public.as_bytes(),
         recipient_public,
     );
+    let signing_key = SigningKey::from_bytes(sender_identity_private);
+    let sender_identity_public = signing_key.verifying_key();
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -336,10 +476,12 @@ fn make_public_envelope(
         .checked_add(16)
         .context("payload too large")?;
     let length = u32::try_from(ciphertext_len).context("payload exceeds MVP size limit")?;
-    let mut aad = Vec::with_capacity(1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + 4);
-    aad.extend([VERSION, SUITE_X25519_CHACHA20_POLY1305]);
+    let mut aad =
+        Vec::with_capacity(1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + IDENTITY_KEY_LEN + 4);
+    aad.extend([VERSION, SUITE_X25519_CHACHA20_POLY1305_AUTHENTICATED]);
     aad.extend(context_hash);
     aad.extend(ephemeral_public.as_bytes());
+    aad.extend(sender_identity_public.as_bytes());
     aad.extend(length.to_be_bytes());
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&encryption_key));
     let ciphertext = cipher
@@ -352,16 +494,39 @@ fn make_public_envelope(
         )
         .map_err(|_| anyhow::anyhow!("encryption failed"))?;
 
+    let signature_message = public_signature_message(
+        VERSION,
+        SUITE_X25519_CHACHA20_POLY1305_AUTHENTICATED,
+        &context_hash,
+        ephemeral_public.as_bytes(),
+        sender_identity_public.as_bytes(),
+        recipient_public,
+        &nonce_bytes,
+        &ciphertext,
+    );
+    let signature = signing_key.sign(&signature_message);
+
     let mut envelope = Vec::with_capacity(
-        LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + NONCE_LEN + 4 + ciphertext.len(),
+        LOCATOR_LEN
+            + 1
+            + 1
+            + CONTEXT_HASH_LEN
+            + PUBLIC_KEY_LEN
+            + IDENTITY_KEY_LEN
+            + NONCE_LEN
+            + 4
+            + ciphertext.len()
+            + SIGNATURE_LEN,
     );
     envelope.extend(public_locator(ephemeral_public.as_bytes(), &context_hash));
-    envelope.extend([VERSION, SUITE_X25519_CHACHA20_POLY1305]);
+    envelope.extend([VERSION, SUITE_X25519_CHACHA20_POLY1305_AUTHENTICATED]);
     envelope.extend(context_hash);
     envelope.extend(ephemeral_public.as_bytes());
+    envelope.extend(sender_identity_public.as_bytes());
     envelope.extend(nonce_bytes);
     envelope.extend(length.to_be_bytes());
     envelope.extend(ciphertext);
+    envelope.extend(signature.to_bytes());
     Ok(envelope)
 }
 
@@ -412,9 +577,19 @@ fn open_envelope(envelope: &[u8], key: &[u8; 32], context: &str) -> Result<Vec<u
 fn open_public_envelope(
     envelope: &[u8],
     private_key: &[u8; PUBLIC_KEY_LEN],
+    trusted_sender_identity_public: &[u8; IDENTITY_KEY_LEN],
     context: &str,
 ) -> Result<Vec<u8>> {
-    let minimum = LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + NONCE_LEN + 4 + 16;
+    let minimum = LOCATOR_LEN
+        + 1
+        + 1
+        + CONTEXT_HASH_LEN
+        + PUBLIC_KEY_LEN
+        + IDENTITY_KEY_LEN
+        + NONCE_LEN
+        + 4
+        + 16
+        + SIGNATURE_LEN;
     if envelope.len() < minimum {
         bail!("public-key envelope is too short");
     }
@@ -422,7 +597,7 @@ fn open_public_envelope(
     if body[0] != VERSION {
         bail!("unsupported envelope version");
     }
-    if body[1] != SUITE_X25519_CHACHA20_POLY1305 {
+    if body[1] != SUITE_X25519_CHACHA20_POLY1305_AUTHENTICATED {
         bail!("unsupported encryption suite");
     }
     let expected_context = context_hash(context);
@@ -435,11 +610,23 @@ fn open_public_envelope(
     if envelope[..LOCATOR_LEN] != public_locator(&ephemeral_bytes, &expected_context) {
         bail!("no matching public-key payload");
     }
-    let nonce_start = ephemeral_end;
+    let sender_start = ephemeral_end;
+    let sender_end = sender_start + IDENTITY_KEY_LEN;
+    let sender_identity_bytes: [u8; IDENTITY_KEY_LEN] =
+        body[sender_start..sender_end].try_into()?;
+    if sender_identity_bytes != *trusted_sender_identity_public {
+        bail!("sender identity does not match trusted public key");
+    }
+    let nonce_start = sender_end;
     let length_start = nonce_start + NONCE_LEN;
     let length = u32::from_be_bytes(body[length_start..length_start + 4].try_into()?) as usize;
     let ciphertext_start = length_start + 4;
-    if length != body.len() - ciphertext_start || length < 16 {
+    let ciphertext_end = ciphertext_start
+        .checked_add(length)
+        .context("envelope length overflow")?;
+    let signature_start = ciphertext_end;
+    let signature_end = signature_start + SIGNATURE_LEN;
+    if length < 16 || signature_end != body.len() {
         bail!("invalid public-key envelope length");
     }
     let private_secret = StaticSecret::from(*private_key);
@@ -451,26 +638,39 @@ fn open_public_envelope(
         &ephemeral_bytes,
         recipient_public.as_bytes(),
     );
-    let mut aad = Vec::with_capacity(1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + 4);
+    let signature_message = public_signature_message(
+        body[0],
+        body[1],
+        &expected_context,
+        &ephemeral_bytes,
+        &sender_identity_bytes,
+        recipient_public.as_bytes(),
+        body[nonce_start..length_start].try_into()?,
+        &body[ciphertext_start..ciphertext_end],
+    );
+    let verifying_key = VerifyingKey::from_bytes(trusted_sender_identity_public)
+        .context("invalid trusted sender public key")?;
+    let signature = Signature::from_bytes(body[signature_start..signature_end].try_into()?);
+    verifying_key
+        .verify(&signature_message, &signature)
+        .map_err(|_| anyhow::anyhow!("sender signature verification failed"))?;
+
+    let mut aad =
+        Vec::with_capacity(1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + IDENTITY_KEY_LEN + 4);
     aad.extend([body[0], body[1]]);
     aad.extend(&body[2..2 + CONTEXT_HASH_LEN]);
     aad.extend(&body[ephemeral_start..ephemeral_end]);
+    aad.extend(&body[sender_start..sender_end]);
     aad.extend((length as u32).to_be_bytes());
     ChaCha20Poly1305::new(Key::from_slice(&encryption_key))
         .decrypt(
             Nonce::from_slice(&body[nonce_start..length_start]),
             chacha20poly1305::aead::Payload {
-                msg: &body[ciphertext_start..],
+                msg: &body[ciphertext_start..ciphertext_end],
                 aad: &aad,
             },
         )
         .map_err(|_| anyhow::anyhow!("authentication failed"))
-}
-
-struct RgbaImage {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
 }
 
 fn read_png(path: &PathBuf) -> Result<RgbaImage> {
@@ -510,82 +710,26 @@ fn write_png(path: &PathBuf, image: &RgbaImage) -> Result<()> {
     Ok(())
 }
 
-fn bits_from_bytes(bytes: &[u8]) -> impl Iterator<Item = u8> + '_ {
-    bytes
-        .iter()
-        .flat_map(|byte| (0..8).rev().map(move |bit| (byte >> bit) & 1))
-}
-
-fn bytes_from_bits(bits: &[u8]) -> Vec<u8> {
-    bits.chunks_exact(8)
-        .map(|chunk| chunk.iter().fold(0, |value, bit| (value << 1) | bit))
-        .collect()
-}
-
-fn capacity_bytes(image: &RgbaImage) -> usize {
-    image.pixels.len() / 4 * 3 / 8
-}
-
-fn embed(image: &mut RgbaImage, payload: &[u8]) -> Result<()> {
-    if payload.len() > capacity_bytes(image) {
-        bail!(
-            "payload requires {} bytes, carrier capacity is {} bytes",
-            payload.len(),
-            capacity_bytes(image)
-        );
-    }
-    let mut bits = bits_from_bytes(payload);
-    for pixel in image.pixels.chunks_exact_mut(4) {
-        for channel in &mut pixel[..3] {
-            if let Some(bit) = bits.next() {
-                *channel = (*channel & 0xfe) | bit;
-            } else {
-                return Ok(());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn extract(image: &RgbaImage, length: usize) -> Result<Vec<u8>> {
-    if length > capacity_bytes(image) {
-        bail!("declared payload exceeds carrier capacity");
-    }
-    let bit_count = length.checked_mul(8).context("payload size overflow")?;
-    let mut bits = Vec::with_capacity(bit_count);
-    for pixel in image.pixels.chunks_exact(4) {
-        for channel in &pixel[..3] {
-            if bits.len() == bit_count {
-                return Ok(bytes_from_bits(&bits));
-            }
-            bits.push(channel & 1);
-        }
-    }
-    if bits.len() != bit_count {
-        bail!("carrier ended before payload completed");
-    }
-    Ok(bytes_from_bits(&bits))
-}
-
-fn encode(
-    input: &PathBuf,
-    carrier: &PathBuf,
-    output: &PathBuf,
+#[allow(clippy::too_many_arguments)]
+fn build_envelope(
+    plaintext: &[u8],
     key_path: Option<&PathBuf>,
     mode: EncryptionMode,
     recipient_public_key_path: Option<&PathBuf>,
+    sender_private_key_path: Option<&PathBuf>,
     context: &str,
-) -> Result<()> {
-    let plaintext =
-        fs::read(input).with_context(|| format!("reading input {}", input.display()))?;
-    let envelope = match mode {
+) -> Result<Vec<u8>> {
+    match mode {
         EncryptionMode::Symmetric => {
             if recipient_public_key_path.is_some() {
                 bail!("--recipient-public-key is only valid with --mode public");
             }
+            if sender_private_key_path.is_some() {
+                bail!("--sender-private-key is only valid with --mode public");
+            }
             let key_path = key_path.context("symmetric mode requires --key")?;
             let key = load_symmetric_key(key_path)?;
-            make_envelope(&plaintext, &key, context)?
+            make_envelope(plaintext, &key, context)
         }
         EncryptionMode::Public => {
             if key_path.is_some() {
@@ -594,11 +738,130 @@ fn encode(
             let public_path =
                 recipient_public_key_path.context("public mode requires --recipient-public-key")?;
             let public_key = load_public_key(public_path)?;
-            make_public_envelope(&plaintext, &public_key, context)?
+            let sender_path =
+                sender_private_key_path.context("public mode requires --sender-private-key")?;
+            let sender_private_key = load_identity_private_key(sender_path)?;
+            make_public_envelope(plaintext, &public_key, &sender_private_key, context)
         }
-    };
+        EncryptionMode::Identity => bail!("identity mode is only valid with keygen"),
+    }
+}
+
+fn open_mode_envelope(
+    envelope: &[u8],
+    key_path: Option<&PathBuf>,
+    mode: EncryptionMode,
+    private_key_path: Option<&PathBuf>,
+    trusted_sender_public_key_path: Option<&PathBuf>,
+    context: &str,
+) -> Result<Vec<u8>> {
+    if private_key_path.is_some() && !matches!(mode, EncryptionMode::Public) {
+        bail!("--private-key is only valid with --mode public");
+    }
+    if trusted_sender_public_key_path.is_some() && !matches!(mode, EncryptionMode::Public) {
+        bail!("--trusted-sender-public-key is only valid with --mode public");
+    }
+    match mode {
+        EncryptionMode::Symmetric => {
+            let key_path = key_path.context("symmetric mode requires --key")?;
+            let key = load_symmetric_key(key_path)?;
+            open_envelope(envelope, &key, context)
+        }
+        EncryptionMode::Public => {
+            if key_path.is_some() {
+                bail!("--key is only valid with --mode symmetric");
+            }
+            let private_path = private_key_path.context("public mode requires --private-key")?;
+            let private_key = load_private_key(private_path)?;
+            let trusted_sender_path = trusted_sender_public_key_path
+                .context("public mode requires --trusted-sender-public-key")?;
+            let trusted_sender_public = load_identity_public_key(trusted_sender_path)?;
+            open_public_envelope(envelope, &private_key, &trusted_sender_public, context)
+        }
+        EncryptionMode::Identity => bail!("identity mode is only valid with keygen"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn text_encode(
+    input: &PathBuf,
+    output: &PathBuf,
+    key_path: Option<&PathBuf>,
+    mode: EncryptionMode,
+    recipient_public_key_path: Option<&PathBuf>,
+    sender_private_key_path: Option<&PathBuf>,
+    context: &str,
+) -> Result<()> {
+    let plaintext =
+        fs::read(input).with_context(|| format!("reading input {}", input.display()))?;
+    let envelope = build_envelope(
+        &plaintext,
+        key_path,
+        mode,
+        recipient_public_key_path,
+        sender_private_key_path,
+        context,
+    )?;
+    let encoded = TextTransport.encode(&envelope);
+    fs::write(output, encoded)
+        .with_context(|| format!("writing text message {}", output.display()))?;
+    println!(
+        "encoded {} bytes into {}",
+        plaintext.len(),
+        output.display()
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn text_decode(
+    input: &PathBuf,
+    output: &PathBuf,
+    key_path: Option<&PathBuf>,
+    mode: EncryptionMode,
+    private_key_path: Option<&PathBuf>,
+    trusted_sender_public_key_path: Option<&PathBuf>,
+    context: &str,
+) -> Result<()> {
+    let text = fs::read_to_string(input)
+        .with_context(|| format!("reading text message {}", input.display()))?;
+    let envelope = TextTransport.decode(&text)?;
+    let plaintext = open_mode_envelope(
+        &envelope,
+        key_path,
+        mode,
+        private_key_path,
+        trusted_sender_public_key_path,
+        context,
+    )?;
+    fs::write(output, plaintext).with_context(|| format!("writing output {}", output.display()))?;
+    println!("decoded text message to {}", output.display());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode(
+    input: &PathBuf,
+    carrier: &PathBuf,
+    output: &PathBuf,
+    key_path: Option<&PathBuf>,
+    mode: EncryptionMode,
+    recipient_public_key_path: Option<&PathBuf>,
+    sender_private_key_path: Option<&PathBuf>,
+    context: &str,
+) -> Result<()> {
+    let plaintext =
+        fs::read(input).with_context(|| format!("reading input {}", input.display()))?;
+    let envelope = build_envelope(
+        &plaintext,
+        key_path,
+        mode,
+        recipient_public_key_path,
+        sender_private_key_path,
+        context,
+    )?;
     let mut image = read_png(carrier)?;
-    embed(&mut image, &envelope)?;
+    PngCarrier.embed(&mut image, &envelope)?;
     write_png(output, &image)?;
     println!(
         "encoded {} bytes into {}",
@@ -614,25 +877,29 @@ fn decode(
     key_path: Option<&PathBuf>,
     mode: EncryptionMode,
     private_key_path: Option<&PathBuf>,
+    trusted_sender_public_key_path: Option<&PathBuf>,
     context: &str,
 ) -> Result<()> {
     if private_key_path.is_some() && !matches!(mode, EncryptionMode::Public) {
         bail!("--private-key is only valid with --mode public");
     }
+    if trusted_sender_public_key_path.is_some() && !matches!(mode, EncryptionMode::Public) {
+        bail!("--trusted-sender-public-key is only valid with --mode public");
+    }
     let image = read_png(input)?;
-    if capacity_bytes(&image) < LOCATOR_LEN + 2 {
+    if PngCarrier.capacity_bytes(&image) < LOCATOR_LEN + 2 {
         bail!("carrier is too small");
     }
-    let suite_prefix = extract(&image, LOCATOR_LEN + 2)?;
+    let suite_prefix = PngCarrier.extract(&image, LOCATOR_LEN + 2)?;
     let suite = suite_prefix[LOCATOR_LEN + 1];
     let (header_len, length_start) = match suite {
         SUITE_CHACHA20_POLY1305 => (
             HEADER_LEN,
             LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + NONCE_LEN,
         ),
-        SUITE_X25519_CHACHA20_POLY1305 => (
-            1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + NONCE_LEN + 4,
-            LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + NONCE_LEN,
+        SUITE_X25519_CHACHA20_POLY1305_AUTHENTICATED => (
+            1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + IDENTITY_KEY_LEN + NONCE_LEN + 4,
+            LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + IDENTITY_KEY_LEN + NONCE_LEN,
         ),
         _ => bail!("unsupported encryption suite"),
     };
@@ -644,11 +911,16 @@ fn decode(
     if std::mem::discriminant(&mode) != std::mem::discriminant(&expected_mode) {
         bail!("selected encryption mode does not match the envelope");
     }
-    let prefix = extract(&image, length_start + 4)?;
+    let prefix = PngCarrier.extract(&image, length_start + 4)?;
     let ciphertext_len =
         u32::from_be_bytes(prefix[length_start..length_start + 4].try_into()?) as usize;
-    let total_len = LOCATOR_LEN + header_len + ciphertext_len;
-    let envelope = extract(&image, total_len)?;
+    let signature_len = if suite == SUITE_X25519_CHACHA20_POLY1305_AUTHENTICATED {
+        SIGNATURE_LEN
+    } else {
+        0
+    };
+    let total_len = LOCATOR_LEN + header_len + ciphertext_len + signature_len;
+    let envelope = PngCarrier.extract(&image, total_len)?;
     let plaintext = match mode {
         EncryptionMode::Symmetric => {
             if private_key_path.is_some() {
@@ -664,7 +936,13 @@ fn decode(
             }
             let private_path = private_key_path.context("public mode requires --private-key")?;
             let private_key = load_private_key(private_path)?;
-            open_public_envelope(&envelope, &private_key, context)?
+            let trusted_sender_path = trusted_sender_public_key_path
+                .context("public mode requires --trusted-sender-public-key")?;
+            let trusted_sender_public = load_identity_public_key(trusted_sender_path)?;
+            open_public_envelope(&envelope, &private_key, &trusted_sender_public, context)?
+        }
+        EncryptionMode::Identity => {
+            bail!("identity mode is only valid with keygen")
         }
     };
     fs::write(output, plaintext).with_context(|| format!("writing output {}", output.display()))?;
@@ -676,7 +954,7 @@ fn inspect(input: &PathBuf) -> Result<()> {
     let image = read_png(input)?;
     println!("format: PNG");
     println!("dimensions: {}x{}", image.width, image.height);
-    println!("LSB capacity: {} bytes", capacity_bytes(&image));
+    println!("LSB capacity: {} bytes", PngCarrier.capacity_bytes(&image));
     println!("note: this MVP supports local PNG carriers only");
     Ok(())
 }
@@ -964,18 +1242,64 @@ mod tests {
     fn public_envelope_round_trip_and_wrong_key_rejection() {
         let recipient_secret = [9u8; 32];
         let recipient_public = PublicKey::from(&StaticSecret::from(recipient_secret));
+        let sender_secret = [3u8; IDENTITY_KEY_LEN];
+        let sender_public = SigningKey::from_bytes(&sender_secret).verifying_key();
         let envelope = make_public_envelope(
             b"public-key message",
             recipient_public.as_bytes(),
+            &sender_secret,
             "public-context",
         )
         .unwrap();
         assert_eq!(
-            open_public_envelope(&envelope, &recipient_secret, "public-context").unwrap(),
+            open_public_envelope(
+                &envelope,
+                &recipient_secret,
+                sender_public.as_bytes(),
+                "public-context"
+            )
+            .unwrap(),
             b"public-key message"
         );
-        assert!(open_public_envelope(&envelope, &[8u8; 32], "public-context").is_err());
-        assert!(open_public_envelope(&envelope, &recipient_secret, "wrong").is_err());
+        assert!(
+            open_public_envelope(
+                &envelope,
+                &[8u8; 32],
+                sender_public.as_bytes(),
+                "public-context"
+            )
+            .is_err()
+        );
+        assert!(
+            open_public_envelope(
+                &envelope,
+                &recipient_secret,
+                &[4u8; IDENTITY_KEY_LEN],
+                "public-context"
+            )
+            .is_err()
+        );
+        assert!(
+            open_public_envelope(
+                &envelope,
+                &recipient_secret,
+                sender_public.as_bytes(),
+                "wrong"
+            )
+            .is_err()
+        );
+        let mut tampered = envelope;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(
+            open_public_envelope(
+                &tampered,
+                &recipient_secret,
+                sender_public.as_bytes(),
+                "public-context"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -986,9 +1310,17 @@ mod tests {
             pixels: vec![255; 16 * 16 * 4],
         };
         let payload = b"carrier payload";
-        embed(&mut image, payload).unwrap();
-        assert_eq!(extract(&image, payload.len()).unwrap(), payload);
-        assert!(embed(&mut image, &[0u8; 200]).is_err());
+        PngCarrier.embed(&mut image, payload).unwrap();
+        assert_eq!(PngCarrier.extract(&image, payload.len()).unwrap(), payload);
+        assert!(PngCarrier.embed(&mut image, &[0u8; 200]).is_err());
+    }
+
+    #[test]
+    fn text_transport_round_trip() {
+        let message = TextTransport.encode(b"protocol payload");
+        assert!(message.starts_with("safechat-text-v1:"));
+        assert_eq!(TextTransport.decode(&message).unwrap(), b"protocol payload");
+        assert!(TextTransport.decode("not-safechat").is_err());
     }
 
     #[test]
@@ -1019,7 +1351,7 @@ mod tests {
             height: reference.height,
             pixels: reference.pixels.clone(),
         };
-        embed(&mut candidate, b"detector test").unwrap();
+        PngCarrier.embed(&mut candidate, b"detector test").unwrap();
         assert!(changed_lsb_count(&reference, &candidate).unwrap() > 0);
         assert_eq!(changed_lsb_count(&reference, &reference).unwrap(), 0);
     }

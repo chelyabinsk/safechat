@@ -47,7 +47,7 @@ docker compose run --rm rust-dev cargo run -- decode \
 docker compose run --rm rust-dev cargo run -- inspect /workspace/carrier.png
 ```
 
-Encryption mode can be selected explicitly. Symmetric mode uses one shared key. Public mode uses a recipient key pair; the image stores the sender's ephemeral public key and the recipient decrypts with the private key:
+Encryption mode can be selected explicitly. Symmetric mode uses one shared key. Public mode uses a recipient key pair plus a long-term sender identity key. The image stores the sender's ephemeral encryption key, identity public key, and signature. The recipient must verify that identity key through a trusted secondary channel:
 
 ```sh
 ./codebase/target/release/safechat keygen \
@@ -55,12 +55,18 @@ Encryption mode can be selected explicitly. Symmetric mode uses one shared key. 
   --public-output codebase/recipient.public \
   codebase/recipient.private
 
+./codebase/target/release/safechat keygen \
+  --mode identity \
+  --public-output codebase/sender.identity.public \
+  codebase/sender.identity.private
+
 ./codebase/target/release/safechat encode \
   --mode public \
   --input codebase/message.txt \
   --carrier codebase/carrier-small.png \
   --output codebase/encoded-public.png \
   --recipient-public-key codebase/recipient.public \
+  --sender-private-key codebase/sender.identity.private \
   --context "public-context"
 
 ./codebase/target/release/safechat decode \
@@ -68,10 +74,35 @@ Encryption mode can be selected explicitly. Symmetric mode uses one shared key. 
   --input codebase/encoded-public.png \
   --output codebase/recovered-public.txt \
   --private-key codebase/recipient.private \
+  --trusted-sender-public-key codebase/sender.identity.public \
   --context "public-context"
 ```
 
-Public-key mode currently provides hybrid encryption and recipient confidentiality. It does not prove who created the message; sender signatures and identity verification are a later protocol milestone.
+Public-key mode provides hybrid encryption, recipient confidentiality, and sender authentication. The embedded identity public key is not trusted by itself; decoding requires the expected sender public key and rejects mismatches or invalid signatures. A compromised or replaced identity still requires user-managed out-of-band rotation.
+
+The carrier-independent text mode uses the same encryption and authentication but writes a URL-safe textual envelope instead of modifying an image. It is useful for testing the communication protocol and sending ordinary chat messages, but it does not provide steganographic cover:
+
+```sh
+./codebase/target/release/safechat text-encode \
+  --mode public \
+  --input codebase/message.txt \
+  --output encrypted-message.txt \
+  --recipient-public-key codebase/recipient.public \
+  --sender-private-key codebase/sender.identity.private \
+  --context "public-context"
+
+./codebase/target/release/safechat text-decode \
+  --mode public \
+  --input encrypted-message.txt \
+  --output recovered-text.txt \
+  --private-key codebase/recipient.private \
+  --trusted-sender-public-key codebase/sender.identity.public \
+  --context "public-context"
+```
+
+The text output begins with `safechat-text-v1:` and is URL-safe Base64, so it can be copied through a chat transport without binary data handling. The text mode currently has the same message-size limitations as the underlying MVP envelope.
+
+The Rust implementation keeps this split explicit: `codebase/src/transport.rs` owns the reference text transport, while `codebase/src/carrier.rs` defines the carrier adapter boundary and contains the initial `PngCarrier`. Future GIF, audio, and video support should implement that boundary without changing the authenticated protocol or text transport.
 
 The reference-pair detector benchmark compares a clean carrier with an encoded candidate:
 

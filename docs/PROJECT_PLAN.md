@@ -84,7 +84,7 @@ The application should expose an algorithm registry with stable identifiers. Eac
 
 The implementation should support one suite completely before adding alternatives. The MVP now exposes symmetric mode and a hybrid X25519/ChaCha20-Poly1305 recipient-encryption mode. Algorithm changes must be negotiated and authenticated, never silently selected from unauthenticated input.
 
-In public-key mode, the sender generates an ephemeral X25519 key pair, derives a one-time AEAD key with the recipient public key, and stores the ephemeral public key in the envelope. This provides recipient confidentiality and forward secrecy for that message, but it does not authenticate the sender. Sender signatures and identity verification remain separate protocol work.
+In public-key mode, the sender generates an ephemeral X25519 key pair, derives a one-time AEAD key with the recipient public key, and stores the ephemeral public key in the envelope. The sender also signs the authenticated envelope fields with a long-term Ed25519 identity key and stores the identity public key alongside the ephemeral key. The recipient must compare that embedded key with a trusted key provisioned out of band before accepting the message. This provides recipient confidentiality, forward secrecy for that message, and sender authentication; identity rotation and revocation remain explicit protocol work.
 
 ## Handshake and sessions
 
@@ -283,6 +283,20 @@ Before production use, the protocol and key-management design should receive an 
 The project will maintain a separate detector tool alongside the encoder. Its purpose is to benchmark carrier detectability and expose regressions during development; it is not part of the production protocol and must not be treated as a universal detector.
 
 The first benchmark should compare clean and encoded PNG/GIF carriers using reproducible baseline measurements, including per-channel LSB statistics, local noise and residual measurements, payload size, image metadata, repeated-carrier comparisons, transformation effects, and a held-out classifier baseline.
+
+The next protocol milestone is defined in [docs/MESSAGE_PROTOCOL.md](MESSAGE_PROTOCOL.md). It establishes canonical message framing, authenticated message identity, replay suppression, asynchronous chunk state, key epochs, rotation, and compromise recovery before those concerns are added to carrier adapters.
+
+## Protocol-first implementation order
+
+The secure communication layer is the project baseline. Carrier embedding is intentionally downstream of it.
+
+1. Implement the custom-key, Signal-inspired identity and prekey handshake with mandatory fingerprint verification.
+2. Establish authenticated session state, message keys, replay handling, rotation, and recovery over the text transport.
+3. Treat encrypted text as the reference transport for protocol tests and interoperability fixtures.
+4. Add PNG and GIF carrier adapters without changing the message or session protocol.
+5. Add audio and video adapters only after their transformation profiles and recovery behavior are independently tested.
+
+This order allows carrier experiments to change without changing the cryptographic trust model.
 
 The benchmark must use disjoint training, validation, and test sets. Carriers derived from the same original source must not cross dataset splits. Every run records the tool version, corpus manifest hash, carrier profile, payload size, transformation pipeline, random seed, and model configuration.
 
