@@ -80,6 +80,32 @@ Encryption mode can be selected explicitly. Symmetric mode uses one shared key. 
 
 Public-key mode provides hybrid encryption, recipient confidentiality, and sender authentication. The embedded identity public key is not trusted by itself; decoding requires the expected sender public key and rejects mismatches or invalid signatures. A compromised or replaced identity still requires user-managed out-of-band rotation.
 
+The initial Signal-like handshake establishes a shared session key. Verify identity fingerprints through your separate secure channel before accepting them:
+
+~~~sh
+safechat keygen --mode public --public-output recipient.public recipient.private
+safechat keygen --mode public --public-output recipient.prekey.public recipient.prekey.private
+safechat keygen --mode identity --public-output recipient.identity.public recipient.identity.private
+safechat prekey-cert --recipient-public-key recipient.public --prekey-public-key recipient.prekey.public --identity-private-key recipient.identity.private --output recipient.prekey.cert
+safechat keygen --mode identity --public-output sender.identity.public sender.identity.private
+safechat fingerprint sender.identity.public
+
+safechat handshake-init --output handshake.txt --session-output sender.session \
+  --recipient-public-key recipient.public \
+  --recipient-identity-public-key recipient.identity.public \
+  --recipient-prekey-public-key recipient.prekey.public \
+  --recipient-prekey-certificate recipient.prekey.cert \
+  --sender-identity-private-key sender.identity.private
+
+safechat handshake-accept --input handshake.txt --output recipient.session \
+  --recipient-private-key recipient.private \
+  --recipient-prekey-private-key recipient.prekey.private \
+  --recipient-identity-private-key recipient.identity.private \
+  --trusted-sender-identity-public-key sender.identity.public
+~~~
+
+This is a custom, versioned X3DH-like bootstrap. It is not interoperable with Signal and does not yet include Double Ratchet message keys, persistent replay state, or post-compromise recovery. The resulting session files can be supplied to symmetric text encoding and decoding with --key.
+
 The carrier-independent text mode uses the same encryption and authentication but writes a URL-safe textual envelope instead of modifying an image. It is useful for testing the communication protocol and sending ordinary chat messages, but it does not provide steganographic cover:
 
 ```sh

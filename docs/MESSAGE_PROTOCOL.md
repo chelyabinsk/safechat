@@ -56,7 +56,7 @@ sender_signature        64 bytes
 
 The signature covers every field above except `sender_signature`, including the recipient key identifier, epoch, message ID, timestamps, chunk fields, and encrypted payload. The associated data for AEAD covers the same routing and protocol fields needed to prevent cross-context substitution.
 
-The current MVP does not yet implement all of these fields. Its existing authenticated public envelope is the cryptographic foundation; adding this framing is the next wire-format milestone.
+The current MVP does not yet implement all of these fields. Its existing authenticated public envelope is the cryptographic foundation. The code now also provides a versioned X3DH-like bootstrap with signed recipient prekeys and fingerprint-gated sender verification; this produces a shared session key but is not yet a Double Ratchet.
 
 ## 4. Message identity and replay handling
 
@@ -163,8 +163,9 @@ Parsing must enforce maximum values before allocation:
 2. Add created/expiry timestamps and strict bounds.
 3. Add chunk fields and message-level digest.
 4. Add a small persistent replay/delivery store.
-5. Add epoch records and authenticated rotation transitions.
-6. Add recovery fixtures for identity replacement and revoked epochs.
-7. Add golden wire fixtures and cross-version rejection tests.
+5. Add a Double Ratchet-style send/receive chain over the established session.
+6. Add epoch records and authenticated rotation transitions.
+7. Add recovery fixtures for identity replacement and revoked epochs.
+8. Add golden wire fixtures and cross-version rejection tests.
 
 No carrier adapter should implement its own replay, identity, or rotation logic.

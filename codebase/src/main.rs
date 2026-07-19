@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+};
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit},
@@ -32,6 +35,9 @@ const HEADER_LEN: usize = 1 + 1 + CONTEXT_HASH_LEN + NONCE_LEN + 4;
 const PUBLIC_KEY_LEN: usize = 32;
 const IDENTITY_KEY_LEN: usize = 32;
 const SIGNATURE_LEN: usize = 64;
+const HANDSHAKE_HEADER: &str = "safechat-handshake-v1:";
+const PREKEY_CERT_HEADER: &str = "safechat-prekey-cert-v1";
+const SESSION_KEY_HEADER: &str = "safechat-session-v1";
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum EncryptionMode {
@@ -59,6 +65,49 @@ enum Command {
         mode: EncryptionMode,
         #[arg(long)]
         public_output: Option<PathBuf>,
+    },
+    Fingerprint {
+        input: PathBuf,
+    },
+    PrekeyCert {
+        #[arg(long)]
+        recipient_public_key: PathBuf,
+        #[arg(long)]
+        prekey_public_key: PathBuf,
+        #[arg(long)]
+        identity_private_key: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    HandshakeInit {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        session_output: PathBuf,
+        #[arg(long)]
+        recipient_public_key: PathBuf,
+        #[arg(long)]
+        recipient_identity_public_key: PathBuf,
+        #[arg(long)]
+        recipient_prekey_public_key: PathBuf,
+        #[arg(long)]
+        recipient_prekey_certificate: PathBuf,
+        #[arg(long)]
+        sender_identity_private_key: PathBuf,
+    },
+    HandshakeAccept {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        recipient_private_key: PathBuf,
+        #[arg(long)]
+        recipient_prekey_private_key: PathBuf,
+        #[arg(long)]
+        recipient_identity_private_key: PathBuf,
+        #[arg(long)]
+        trusted_sender_identity_public_key: PathBuf,
     },
     Encode {
         #[arg(long)]
@@ -159,6 +208,50 @@ fn main() -> Result<()> {
             mode,
             public_output,
         } => keygen(&output, mode, public_output.as_ref()),
+        Command::Fingerprint { input } => fingerprint(&input),
+        Command::PrekeyCert {
+            recipient_public_key,
+            prekey_public_key,
+            identity_private_key,
+            output,
+        } => prekey_cert(
+            &recipient_public_key,
+            &prekey_public_key,
+            &identity_private_key,
+            &output,
+        ),
+        Command::HandshakeInit {
+            output,
+            session_output,
+            recipient_public_key,
+            recipient_identity_public_key,
+            recipient_prekey_public_key,
+            recipient_prekey_certificate,
+            sender_identity_private_key,
+        } => handshake_init(
+            &output,
+            &session_output,
+            &recipient_public_key,
+            &recipient_identity_public_key,
+            &recipient_prekey_public_key,
+            &recipient_prekey_certificate,
+            &sender_identity_private_key,
+        ),
+        Command::HandshakeAccept {
+            input,
+            output,
+            recipient_private_key,
+            recipient_prekey_private_key,
+            recipient_identity_private_key,
+            trusted_sender_identity_public_key,
+        } => handshake_accept(
+            &input,
+            &output,
+            &recipient_private_key,
+            &recipient_prekey_private_key,
+            &recipient_identity_private_key,
+            &trusted_sender_identity_public_key,
+        ),
         Command::Encode {
             input,
             carrier,
@@ -313,7 +406,13 @@ fn load_material(path: &PathBuf, expected_header: &str) -> Result<[u8; 32]> {
 }
 
 fn load_symmetric_key(path: &PathBuf) -> Result<[u8; 32]> {
-    load_material(path, "safechat-key-v1:")
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading symmetric key {}", path.display()))?;
+    if text.trim().starts_with(SESSION_KEY_HEADER) {
+        load_session_key(path)
+    } else {
+        load_material(path, "safechat-key-v1:")
+    }
 }
 
 fn load_private_key(path: &PathBuf) -> Result<[u8; 32]> {
@@ -330,6 +429,292 @@ fn load_identity_private_key(path: &PathBuf) -> Result<[u8; IDENTITY_KEY_LEN]> {
 
 fn load_identity_public_key(path: &PathBuf) -> Result<[u8; IDENTITY_KEY_LEN]> {
     load_material(path, "safechat-identity-public-v1:")
+}
+
+fn load_session_key(path: &PathBuf) -> Result<[u8; 32]> {
+    load_material(path, &format!("{SESSION_KEY_HEADER}:"))
+}
+
+fn public_key_fingerprint(key: &[u8]) -> String {
+    Sha256::digest(key)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|chunk| chunk.join(""))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn fingerprint(path: &PathBuf) -> Result<()> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading public key {}", path.display()))?;
+    let key = if text.trim().starts_with("safechat-public-v1:") {
+        load_public_key(path)?.to_vec()
+    } else if text.trim().starts_with("safechat-identity-public-v1:") {
+        load_identity_public_key(path)?.to_vec()
+    } else {
+        bail!("fingerprint requires a SafeChat public or identity public key")
+    };
+    println!("{}", public_key_fingerprint(&key));
+    Ok(())
+}
+
+fn prekey_certificate_message(
+    recipient_public: &[u8; PUBLIC_KEY_LEN],
+    prekey_public: &[u8; PUBLIC_KEY_LEN],
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(32 + PUBLIC_KEY_LEN * 2);
+    message.extend(b"safechat/prekey-cert/v1");
+    message.extend(recipient_public);
+    message.extend(prekey_public);
+    message
+}
+
+fn prekey_cert(
+    recipient_public_path: &PathBuf,
+    prekey_public_path: &PathBuf,
+    identity_private_path: &PathBuf,
+    output: &PathBuf,
+) -> Result<()> {
+    let recipient_public = load_public_key(recipient_public_path)?;
+    let prekey_public = load_public_key(prekey_public_path)?;
+    let identity_private = load_identity_private_key(identity_private_path)?;
+    let identity = SigningKey::from_bytes(&identity_private);
+    let signature = identity.sign(&prekey_certificate_message(
+        &recipient_public,
+        &prekey_public,
+    ));
+    let mut certificate = Vec::with_capacity(PUBLIC_KEY_LEN * 2 + SIGNATURE_LEN);
+    certificate.extend(recipient_public);
+    certificate.extend(prekey_public);
+    certificate.extend(signature.to_bytes());
+    write_secret_file(output, PREKEY_CERT_HEADER, &certificate)?;
+    println!("wrote signed prekey certificate: {}", output.display());
+    Ok(())
+}
+
+fn load_prekey_certificate(path: &PathBuf) -> Result<([u8; 32], [u8; 32], [u8; 64])> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading prekey certificate {}", path.display()))?;
+    let encoded = text
+        .trim()
+        .strip_prefix(&format!("{PREKEY_CERT_HEADER}:"))
+        .context("invalid prekey certificate header")?;
+    let bytes = STANDARD_NO_PAD
+        .decode(encoded)
+        .context("invalid prekey certificate encoding")?;
+    if bytes.len() != PUBLIC_KEY_LEN * 2 + SIGNATURE_LEN {
+        bail!("invalid prekey certificate length");
+    }
+    let mut recipient = [0u8; 32];
+    let mut prekey = [0u8; 32];
+    let mut signature = [0u8; 64];
+    recipient.copy_from_slice(&bytes[..32]);
+    prekey.copy_from_slice(&bytes[32..64]);
+    signature.copy_from_slice(&bytes[64..]);
+    Ok((recipient, prekey, signature))
+}
+
+fn handshake_signature_message(
+    recipient_public: &[u8; PUBLIC_KEY_LEN],
+    recipient_identity_public: &[u8; IDENTITY_KEY_LEN],
+    recipient_prekey_public: &[u8; PUBLIC_KEY_LEN],
+    initiator_ephemeral_public: &[u8; PUBLIC_KEY_LEN],
+    initiator_identity_public: &[u8; IDENTITY_KEY_LEN],
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(32 + 32 * 5);
+    message.extend(b"safechat/handshake/v1");
+    message.extend(recipient_public);
+    message.extend(recipient_identity_public);
+    message.extend(recipient_prekey_public);
+    message.extend(initiator_ephemeral_public);
+    message.extend(initiator_identity_public);
+    message
+}
+
+fn derive_handshake_session(
+    first_dh: &[u8; PUBLIC_KEY_LEN],
+    second_dh: &[u8; PUBLIC_KEY_LEN],
+    recipient_public: &[u8; PUBLIC_KEY_LEN],
+    recipient_prekey_public: &[u8; PUBLIC_KEY_LEN],
+    initiator_ephemeral_public: &[u8; PUBLIC_KEY_LEN],
+    initiator_identity_public: &[u8; IDENTITY_KEY_LEN],
+) -> [u8; 32] {
+    let mut input = Vec::with_capacity(PUBLIC_KEY_LEN * 5 + IDENTITY_KEY_LEN);
+    input.extend(first_dh);
+    input.extend(second_dh);
+    input.extend(recipient_public);
+    input.extend(recipient_prekey_public);
+    input.extend(initiator_ephemeral_public);
+    input.extend(initiator_identity_public);
+    let hkdf = Hkdf::<Sha256>::new(Some(b"safechat/handshake/v1"), &input);
+    let mut session = [0u8; 32];
+    hkdf.expand(b"safechat/session-key/v1", &mut session)
+        .expect("32-byte HKDF output is valid");
+    session
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handshake_init(
+    output: &PathBuf,
+    session_output: &PathBuf,
+    recipient_public_path: &PathBuf,
+    recipient_identity_public_path: &PathBuf,
+    recipient_prekey_public_path: &PathBuf,
+    certificate_path: &PathBuf,
+    sender_identity_private_path: &PathBuf,
+) -> Result<()> {
+    let recipient_public = load_public_key(recipient_public_path)?;
+    let recipient_identity_public = load_identity_public_key(recipient_identity_public_path)?;
+    let recipient_prekey_public = load_public_key(recipient_prekey_public_path)?;
+    let (cert_recipient, cert_prekey, cert_signature) = load_prekey_certificate(certificate_path)?;
+    if cert_recipient != recipient_public || cert_prekey != recipient_prekey_public {
+        bail!("prekey certificate does not match the supplied recipient keys");
+    }
+    let recipient_identity = VerifyingKey::from_bytes(&recipient_identity_public)
+        .context("invalid recipient identity public key")?;
+    recipient_identity
+        .verify(
+            &prekey_certificate_message(&recipient_public, &recipient_prekey_public),
+            &Signature::from_bytes(&cert_signature),
+        )
+        .map_err(|_| anyhow::anyhow!("recipient prekey certificate is invalid"))?;
+    let sender_identity_private = load_identity_private_key(sender_identity_private_path)?;
+    let sender_identity = SigningKey::from_bytes(&sender_identity_private);
+    let sender_identity_public = sender_identity.verifying_key();
+    let mut ephemeral_bytes = [0u8; PUBLIC_KEY_LEN];
+    OsRng.fill_bytes(&mut ephemeral_bytes);
+    let ephemeral_secret = StaticSecret::from(ephemeral_bytes);
+    let ephemeral_public = PublicKey::from(&ephemeral_secret);
+    let signature_message = handshake_signature_message(
+        &recipient_public,
+        &recipient_identity_public,
+        &recipient_prekey_public,
+        ephemeral_public.as_bytes(),
+        sender_identity_public.as_bytes(),
+    );
+    let signature = sender_identity.sign(&signature_message);
+    let mut handshake =
+        Vec::with_capacity(1 + PUBLIC_KEY_LEN * 3 + IDENTITY_KEY_LEN * 2 + SIGNATURE_LEN * 2);
+    handshake.extend([VERSION]);
+    handshake.extend(recipient_public);
+    handshake.extend(recipient_identity_public);
+    handshake.extend(recipient_prekey_public);
+    handshake.extend(cert_signature);
+    handshake.extend(ephemeral_public.as_bytes());
+    handshake.extend(sender_identity_public.as_bytes());
+    handshake.extend(signature.to_bytes());
+    let encoded = format!("{HANDSHAKE_HEADER}{}\n", URL_SAFE_NO_PAD.encode(handshake));
+    fs::write(output, encoded)
+        .with_context(|| format!("writing handshake {}", output.display()))?;
+    let first = ephemeral_secret.diffie_hellman(&PublicKey::from(recipient_public));
+    let second = ephemeral_secret.diffie_hellman(&PublicKey::from(recipient_prekey_public));
+    let session = derive_handshake_session(
+        first.as_bytes(),
+        second.as_bytes(),
+        &recipient_public,
+        &recipient_prekey_public,
+        ephemeral_public.as_bytes(),
+        sender_identity_public.as_bytes(),
+    );
+    write_secret_file(session_output, SESSION_KEY_HEADER, &session)?;
+    println!(
+        "wrote handshake and session key for sender fingerprint: {}",
+        public_key_fingerprint(sender_identity_public.as_bytes())
+    );
+    Ok(())
+}
+
+fn handshake_accept(
+    input: &PathBuf,
+    output: &PathBuf,
+    recipient_private_path: &PathBuf,
+    recipient_prekey_private_path: &PathBuf,
+    recipient_identity_private_path: &PathBuf,
+    trusted_sender_identity_public_path: &PathBuf,
+) -> Result<()> {
+    let text = fs::read_to_string(input)
+        .with_context(|| format!("reading handshake {}", input.display()))?;
+    let encoded = text
+        .trim()
+        .strip_prefix(HANDSHAKE_HEADER)
+        .context("invalid handshake header")?;
+    let handshake = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .context("invalid handshake encoding")?;
+    let expected_len = 1 + PUBLIC_KEY_LEN * 3 + IDENTITY_KEY_LEN * 2 + SIGNATURE_LEN * 2;
+    if handshake.len() != expected_len {
+        bail!("invalid handshake length");
+    }
+    if handshake[0] != VERSION {
+        bail!("unsupported handshake version");
+    }
+    let recipient_private = load_private_key(recipient_private_path)?;
+    let recipient_prekey_private = load_private_key(recipient_prekey_private_path)?;
+    let recipient_public = PublicKey::from(&StaticSecret::from(recipient_private)).to_bytes();
+    let recipient_identity_private = load_identity_private_key(recipient_identity_private_path)?;
+    let recipient_identity = SigningKey::from_bytes(&recipient_identity_private);
+    let trusted_sender = load_identity_public_key(trusted_sender_identity_public_path)?;
+    let mut supplied_recipient = [0u8; 32];
+    supplied_recipient.copy_from_slice(&handshake[1..33]);
+    if supplied_recipient != recipient_public {
+        bail!("handshake is addressed to a different recipient");
+    }
+    let mut recipient_identity_public = [0u8; 32];
+    recipient_identity_public.copy_from_slice(&handshake[33..65]);
+    if recipient_identity_public != *recipient_identity.verifying_key().as_bytes() {
+        bail!("recipient identity does not match local identity key");
+    }
+    let mut recipient_prekey_public = [0u8; 32];
+    recipient_prekey_public.copy_from_slice(&handshake[65..97]);
+    let cert_signature = Signature::from_bytes(handshake[97..161].try_into()?);
+    recipient_identity
+        .verifying_key()
+        .verify(
+            &prekey_certificate_message(&recipient_public, &recipient_prekey_public),
+            &cert_signature,
+        )
+        .map_err(|_| anyhow::anyhow!("recipient prekey certificate is invalid"))?;
+    let mut initiator_ephemeral_public = [0u8; 32];
+    initiator_ephemeral_public.copy_from_slice(&handshake[161..193]);
+    let mut initiator_identity_public = [0u8; 32];
+    initiator_identity_public.copy_from_slice(&handshake[193..225]);
+    if initiator_identity_public != trusted_sender {
+        bail!("sender identity does not match trusted fingerprint");
+    }
+    let signature = Signature::from_bytes(handshake[225..289].try_into()?);
+    let trusted_sender_key = VerifyingKey::from_bytes(&trusted_sender)
+        .context("invalid trusted sender identity public key")?;
+    trusted_sender_key
+        .verify(
+            &handshake_signature_message(
+                &recipient_public,
+                &recipient_identity_public,
+                &recipient_prekey_public,
+                &initiator_ephemeral_public,
+                &initiator_identity_public,
+            ),
+            &signature,
+        )
+        .map_err(|_| anyhow::anyhow!("handshake sender signature is invalid"))?;
+    let ephemeral_public = PublicKey::from(initiator_ephemeral_public);
+    let first = StaticSecret::from(recipient_private).diffie_hellman(&ephemeral_public);
+    let second = StaticSecret::from(recipient_prekey_private).diffie_hellman(&ephemeral_public);
+    let session = derive_handshake_session(
+        first.as_bytes(),
+        second.as_bytes(),
+        &recipient_public,
+        &recipient_prekey_public,
+        &initiator_ephemeral_public,
+        &initiator_identity_public,
+    );
+    write_secret_file(output, SESSION_KEY_HEADER, &session)?;
+    println!(
+        "accepted handshake; session key written to {}",
+        output.display()
+    );
+    Ok(())
 }
 
 fn context_hash(context: &str) -> [u8; CONTEXT_HASH_LEN] {
@@ -1321,6 +1706,38 @@ mod tests {
         assert!(message.starts_with("safechat-text-v1:"));
         assert_eq!(TextTransport.decode(&message).unwrap(), b"protocol payload");
         assert!(TextTransport.decode("not-safechat").is_err());
+    }
+
+    #[test]
+    fn handshake_derivation_is_symmetric() {
+        let initiator_secret = StaticSecret::from([1u8; 32]);
+        let recipient_secret = StaticSecret::from([2u8; 32]);
+        let prekey_secret = StaticSecret::from([3u8; 32]);
+        let initiator_public = PublicKey::from(&initiator_secret);
+        let recipient_public = PublicKey::from(&recipient_secret);
+        let prekey_public = PublicKey::from(&prekey_secret);
+        let initiator_identity = [4u8; IDENTITY_KEY_LEN];
+        let initiator_first = initiator_secret.diffie_hellman(&recipient_public);
+        let initiator_second = initiator_secret.diffie_hellman(&prekey_public);
+        let recipient_first = recipient_secret.diffie_hellman(&initiator_public);
+        let recipient_second = prekey_secret.diffie_hellman(&initiator_public);
+        let initiator_session = derive_handshake_session(
+            initiator_first.as_bytes(),
+            initiator_second.as_bytes(),
+            recipient_public.as_bytes(),
+            prekey_public.as_bytes(),
+            initiator_public.as_bytes(),
+            &initiator_identity,
+        );
+        let recipient_session = derive_handshake_session(
+            recipient_first.as_bytes(),
+            recipient_second.as_bytes(),
+            recipient_public.as_bytes(),
+            prekey_public.as_bytes(),
+            initiator_public.as_bytes(),
+            &initiator_identity,
+        );
+        assert_eq!(initiator_session, recipient_session);
     }
 
     #[test]
