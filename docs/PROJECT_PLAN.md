@@ -82,7 +82,9 @@ Initial algorithm suite:
 
 The application should expose an algorithm registry with stable identifiers. Each suite must define its key sizes, nonce rules, authentication behavior, and compatibility requirements.
 
-The first implementation should support one default suite completely before adding alternatives. Algorithm changes must be negotiated and authenticated, never silently selected from unauthenticated input.
+The implementation should support one suite completely before adding alternatives. The MVP now exposes symmetric mode and a hybrid X25519/ChaCha20-Poly1305 recipient-encryption mode. Algorithm changes must be negotiated and authenticated, never silently selected from unauthenticated input.
+
+In public-key mode, the sender generates an ephemeral X25519 key pair, derives a one-time AEAD key with the recipient public key, and stores the ephemeral public key in the envelope. This provides recipient confidentiality and forward secrecy for that message, but it does not authenticate the sender. Sender signatures and identity verification remain separate protocol work.
 
 ## Handshake and sessions
 

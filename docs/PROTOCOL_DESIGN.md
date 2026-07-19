@@ -126,7 +126,9 @@ Rules:
 - no field changes meaning between versions
 - removed algorithms remain rejected even if a carrier requests them
 
-The first release should ship one fully tested encryption suite. Algorithm agility must not become an untested collection of combinations.
+The first release should ship a small number of fully tested suites. The MVP supports symmetric ChaCha20-Poly1305 and hybrid X25519/ChaCha20-Poly1305 recipient encryption. Algorithm agility must not become an untested collection of combinations.
+
+Public-key mode stores the sender's ephemeral X25519 public key in the envelope. The recipient uses its private key to derive the per-message AEAD key. This mode provides recipient confidentiality but does not authenticate the sender; a future signed-identity mode must add sender signatures and trusted identity-key verification rather than assuming that encryption proves authorship.
 
 ## 6. Length, padding, and metadata leakage
 

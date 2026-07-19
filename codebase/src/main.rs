@@ -5,20 +5,30 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use clap::{Parser, Subcommand};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use png::{BitDepth, ColorType, Decoder, Encoder, Transformations};
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 type HmacSha256 = Hmac<Sha256>;
 
 const VERSION: u8 = 1;
 const SUITE_CHACHA20_POLY1305: u8 = 1;
+const SUITE_X25519_CHACHA20_POLY1305: u8 = 2;
 const LOCATOR_LEN: usize = 16;
 const CONTEXT_HASH_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const HEADER_LEN: usize = 1 + 1 + CONTEXT_HASH_LEN + NONCE_LEN + 4;
+const PUBLIC_KEY_LEN: usize = 32;
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum EncryptionMode {
+    Symmetric,
+    Public,
+}
 
 #[derive(Parser)]
 #[command(
@@ -35,6 +45,10 @@ struct Cli {
 enum Command {
     Keygen {
         output: PathBuf,
+        #[arg(long, value_enum, default_value_t = EncryptionMode::Symmetric)]
+        mode: EncryptionMode,
+        #[arg(long)]
+        public_output: Option<PathBuf>,
     },
     Encode {
         #[arg(long)]
@@ -44,7 +58,11 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
-        key: PathBuf,
+        key: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = EncryptionMode::Symmetric)]
+        mode: EncryptionMode,
+        #[arg(long)]
+        recipient_public_key: Option<PathBuf>,
         #[arg(long, default_value = "")]
         context: String,
     },
@@ -54,7 +72,11 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
-        key: PathBuf,
+        key: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = EncryptionMode::Symmetric)]
+        mode: EncryptionMode,
+        #[arg(long)]
+        private_key: Option<PathBuf>,
         #[arg(long, default_value = "")]
         context: String,
     },
@@ -78,20 +100,43 @@ enum Command {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Keygen { output } => keygen(&output),
+        Command::Keygen {
+            output,
+            mode,
+            public_output,
+        } => keygen(&output, mode, public_output.as_ref()),
         Command::Encode {
             input,
             carrier,
             output,
             key,
+            mode,
+            recipient_public_key,
             context,
-        } => encode(&input, &carrier, &output, &key, &context),
+        } => encode(
+            &input,
+            &carrier,
+            &output,
+            key.as_ref(),
+            mode,
+            recipient_public_key.as_ref(),
+            &context,
+        ),
         Command::Decode {
             input,
             output,
             key,
+            mode,
+            private_key,
             context,
-        } => decode(&input, &output, &key, &context),
+        } => decode(
+            &input,
+            &output,
+            key.as_ref(),
+            mode,
+            private_key.as_ref(),
+            &context,
+        ),
         Command::Inspect { input } => inspect(&input),
         Command::Detect {
             reference,
@@ -105,11 +150,9 @@ fn main() -> Result<()> {
     }
 }
 
-fn keygen(path: &PathBuf) -> Result<()> {
-    let mut key = [0u8; 32];
-    OsRng.fill_bytes(&mut key);
-    let encoded = STANDARD_NO_PAD.encode(key);
-    fs::write(path, format!("safechat-key-v1:{encoded}\n"))
+fn write_secret_file(path: &PathBuf, header: &str, bytes: &[u8]) -> Result<()> {
+    let encoded = STANDARD_NO_PAD.encode(bytes);
+    fs::write(path, format!("{header}:{encoded}\n"))
         .with_context(|| format!("writing key file {}", path.display()))?;
     #[cfg(unix)]
     {
@@ -117,17 +160,39 @@ fn keygen(path: &PathBuf) -> Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .with_context(|| format!("protecting key file {}", path.display()))?;
     }
+    Ok(())
+}
+
+fn keygen(path: &PathBuf, mode: EncryptionMode, public_output: Option<&PathBuf>) -> Result<()> {
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    match mode {
+        EncryptionMode::Symmetric => {
+            if public_output.is_some() {
+                bail!("--public-output is only valid with --mode public");
+            }
+            write_secret_file(path, "safechat-key-v1", &key)?;
+        }
+        EncryptionMode::Public => {
+            let public_path = public_output.context("public mode requires --public-output")?;
+            let secret = StaticSecret::from(key);
+            let public = PublicKey::from(&secret);
+            write_secret_file(path, "safechat-private-v1", secret.as_bytes())?;
+            write_secret_file(public_path, "safechat-public-v1", public.as_bytes())?;
+            println!("generated public key: {}", public_path.display());
+        }
+    }
     println!("generated key: {}", path.display());
     Ok(())
 }
 
-fn load_key(path: &PathBuf) -> Result<[u8; 32]> {
+fn load_material(path: &PathBuf, expected_header: &str) -> Result<[u8; 32]> {
     let text =
         fs::read_to_string(path).with_context(|| format!("reading key file {}", path.display()))?;
     let encoded = text
         .trim()
-        .strip_prefix("safechat-key-v1:")
-        .context("invalid key file header")?;
+        .strip_prefix(expected_header)
+        .with_context(|| format!("invalid key file header; expected {expected_header}"))?;
     let bytes = STANDARD_NO_PAD
         .decode(encoded)
         .context("invalid base64 key")?;
@@ -137,6 +202,18 @@ fn load_key(path: &PathBuf) -> Result<[u8; 32]> {
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes);
     Ok(key)
+}
+
+fn load_symmetric_key(path: &PathBuf) -> Result<[u8; 32]> {
+    load_material(path, "safechat-key-v1:")
+}
+
+fn load_private_key(path: &PathBuf) -> Result<[u8; 32]> {
+    load_material(path, "safechat-private-v1:")
+}
+
+fn load_public_key(path: &PathBuf) -> Result<[u8; 32]> {
+    load_material(path, "safechat-public-v1:")
 }
 
 fn context_hash(context: &str) -> [u8; CONTEXT_HASH_LEN] {
@@ -190,6 +267,91 @@ fn make_envelope(plaintext: &[u8], key: &[u8; 32], context: &str) -> Result<Vec<
     Ok(envelope)
 }
 
+fn public_locator(
+    ephemeral_public: &[u8; PUBLIC_KEY_LEN],
+    context: &[u8; CONTEXT_HASH_LEN],
+) -> [u8; LOCATOR_LEN] {
+    let mut hash = Sha256::new();
+    hash.update(b"safechat/public-locator/v1");
+    hash.update(ephemeral_public);
+    hash.update(context);
+    let digest = hash.finalize();
+    let mut result = [0u8; LOCATOR_LEN];
+    result.copy_from_slice(&digest[..LOCATOR_LEN]);
+    result
+}
+
+fn derive_public_mode_key(
+    shared_secret: &[u8; PUBLIC_KEY_LEN],
+    context: &[u8; CONTEXT_HASH_LEN],
+    ephemeral_public: &[u8; PUBLIC_KEY_LEN],
+    recipient_public: &[u8; PUBLIC_KEY_LEN],
+) -> [u8; 32] {
+    let hkdf = Hkdf::<Sha256>::new(Some(context), shared_secret);
+    let mut info = Vec::with_capacity(32 + PUBLIC_KEY_LEN * 2);
+    info.extend(b"safechat/x25519-chacha20poly1305/v1");
+    info.extend(ephemeral_public);
+    info.extend(recipient_public);
+    let mut key = [0u8; 32];
+    hkdf.expand(&info, &mut key)
+        .expect("32-byte HKDF output is valid");
+    key
+}
+
+fn make_public_envelope(
+    plaintext: &[u8],
+    recipient_public: &[u8; PUBLIC_KEY_LEN],
+    context: &str,
+) -> Result<Vec<u8>> {
+    let context_hash = context_hash(context);
+    let mut ephemeral_bytes = [0u8; PUBLIC_KEY_LEN];
+    OsRng.fill_bytes(&mut ephemeral_bytes);
+    let ephemeral_secret = StaticSecret::from(ephemeral_bytes);
+    let ephemeral_public = PublicKey::from(&ephemeral_secret);
+    let shared_secret = ephemeral_secret.diffie_hellman(&PublicKey::from(*recipient_public));
+    let encryption_key = derive_public_mode_key(
+        shared_secret.as_bytes(),
+        &context_hash,
+        ephemeral_public.as_bytes(),
+        recipient_public,
+    );
+
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let ciphertext_len = plaintext
+        .len()
+        .checked_add(16)
+        .context("payload too large")?;
+    let length = u32::try_from(ciphertext_len).context("payload exceeds MVP size limit")?;
+    let mut aad = Vec::with_capacity(1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + 4);
+    aad.extend([VERSION, SUITE_X25519_CHACHA20_POLY1305]);
+    aad.extend(context_hash);
+    aad.extend(ephemeral_public.as_bytes());
+    aad.extend(length.to_be_bytes());
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&encryption_key));
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("encryption failed"))?;
+
+    let mut envelope = Vec::with_capacity(
+        LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + NONCE_LEN + 4 + ciphertext.len(),
+    );
+    envelope.extend(public_locator(ephemeral_public.as_bytes(), &context_hash));
+    envelope.extend([VERSION, SUITE_X25519_CHACHA20_POLY1305]);
+    envelope.extend(context_hash);
+    envelope.extend(ephemeral_public.as_bytes());
+    envelope.extend(nonce_bytes);
+    envelope.extend(length.to_be_bytes());
+    envelope.extend(ciphertext);
+    Ok(envelope)
+}
+
 fn open_envelope(envelope: &[u8], key: &[u8; 32], context: &str) -> Result<Vec<u8>> {
     if envelope.len() < LOCATOR_LEN + HEADER_LEN + 16 {
         bail!("envelope is too short");
@@ -224,6 +386,64 @@ fn open_envelope(envelope: &[u8], key: &[u8; 32], context: &str) -> Result<Vec<u
     aad.extend((length as u32).to_be_bytes());
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     cipher
+        .decrypt(
+            Nonce::from_slice(&body[nonce_start..length_start]),
+            chacha20poly1305::aead::Payload {
+                msg: &body[ciphertext_start..],
+                aad: &aad,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("authentication failed"))
+}
+
+fn open_public_envelope(
+    envelope: &[u8],
+    private_key: &[u8; PUBLIC_KEY_LEN],
+    context: &str,
+) -> Result<Vec<u8>> {
+    let minimum = LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + NONCE_LEN + 4 + 16;
+    if envelope.len() < minimum {
+        bail!("public-key envelope is too short");
+    }
+    let body = &envelope[LOCATOR_LEN..];
+    if body[0] != VERSION {
+        bail!("unsupported envelope version");
+    }
+    if body[1] != SUITE_X25519_CHACHA20_POLY1305 {
+        bail!("unsupported encryption suite");
+    }
+    let expected_context = context_hash(context);
+    if body[2..2 + CONTEXT_HASH_LEN] != expected_context {
+        bail!("context does not match");
+    }
+    let ephemeral_start = 2 + CONTEXT_HASH_LEN;
+    let ephemeral_end = ephemeral_start + PUBLIC_KEY_LEN;
+    let ephemeral_bytes: [u8; PUBLIC_KEY_LEN] = body[ephemeral_start..ephemeral_end].try_into()?;
+    if envelope[..LOCATOR_LEN] != public_locator(&ephemeral_bytes, &expected_context) {
+        bail!("no matching public-key payload");
+    }
+    let nonce_start = ephemeral_end;
+    let length_start = nonce_start + NONCE_LEN;
+    let length = u32::from_be_bytes(body[length_start..length_start + 4].try_into()?) as usize;
+    let ciphertext_start = length_start + 4;
+    if length != body.len() - ciphertext_start || length < 16 {
+        bail!("invalid public-key envelope length");
+    }
+    let private_secret = StaticSecret::from(*private_key);
+    let recipient_public = PublicKey::from(&private_secret);
+    let shared_secret = private_secret.diffie_hellman(&PublicKey::from(ephemeral_bytes));
+    let encryption_key = derive_public_mode_key(
+        shared_secret.as_bytes(),
+        &expected_context,
+        &ephemeral_bytes,
+        recipient_public.as_bytes(),
+    );
+    let mut aad = Vec::with_capacity(1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + 4);
+    aad.extend([body[0], body[1]]);
+    aad.extend(&body[2..2 + CONTEXT_HASH_LEN]);
+    aad.extend(&body[ephemeral_start..ephemeral_end]);
+    aad.extend((length as u32).to_be_bytes());
+    ChaCha20Poly1305::new(Key::from_slice(&encryption_key))
         .decrypt(
             Nonce::from_slice(&body[nonce_start..length_start]),
             chacha20poly1305::aead::Payload {
@@ -338,13 +558,32 @@ fn encode(
     input: &PathBuf,
     carrier: &PathBuf,
     output: &PathBuf,
-    key_path: &PathBuf,
+    key_path: Option<&PathBuf>,
+    mode: EncryptionMode,
+    recipient_public_key_path: Option<&PathBuf>,
     context: &str,
 ) -> Result<()> {
-    let key = load_key(key_path)?;
     let plaintext =
         fs::read(input).with_context(|| format!("reading input {}", input.display()))?;
-    let envelope = make_envelope(&plaintext, &key, context)?;
+    let envelope = match mode {
+        EncryptionMode::Symmetric => {
+            if recipient_public_key_path.is_some() {
+                bail!("--recipient-public-key is only valid with --mode public");
+            }
+            let key_path = key_path.context("symmetric mode requires --key")?;
+            let key = load_symmetric_key(key_path)?;
+            make_envelope(&plaintext, &key, context)?
+        }
+        EncryptionMode::Public => {
+            if key_path.is_some() {
+                bail!("--key is only valid with --mode symmetric");
+            }
+            let public_path =
+                recipient_public_key_path.context("public mode requires --recipient-public-key")?;
+            let public_key = load_public_key(public_path)?;
+            make_public_envelope(&plaintext, &public_key, context)?
+        }
+    };
     let mut image = read_png(carrier)?;
     embed(&mut image, &envelope)?;
     write_png(output, &image)?;
@@ -356,19 +595,65 @@ fn encode(
     Ok(())
 }
 
-fn decode(input: &PathBuf, output: &PathBuf, key_path: &PathBuf, context: &str) -> Result<()> {
-    let key = load_key(key_path)?;
+fn decode(
+    input: &PathBuf,
+    output: &PathBuf,
+    key_path: Option<&PathBuf>,
+    mode: EncryptionMode,
+    private_key_path: Option<&PathBuf>,
+    context: &str,
+) -> Result<()> {
+    if private_key_path.is_some() && !matches!(mode, EncryptionMode::Public) {
+        bail!("--private-key is only valid with --mode public");
+    }
     let image = read_png(input)?;
-    if capacity_bytes(&image) < LOCATOR_LEN + HEADER_LEN + 16 {
+    if capacity_bytes(&image) < LOCATOR_LEN + 2 {
         bail!("carrier is too small");
     }
-    let prefix = extract(&image, LOCATOR_LEN + HEADER_LEN)?;
-    let length_start = LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + NONCE_LEN;
+    let suite_prefix = extract(&image, LOCATOR_LEN + 2)?;
+    let suite = suite_prefix[LOCATOR_LEN + 1];
+    let (header_len, length_start) = match suite {
+        SUITE_CHACHA20_POLY1305 => (
+            HEADER_LEN,
+            LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + NONCE_LEN,
+        ),
+        SUITE_X25519_CHACHA20_POLY1305 => (
+            1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + NONCE_LEN + 4,
+            LOCATOR_LEN + 1 + 1 + CONTEXT_HASH_LEN + PUBLIC_KEY_LEN + NONCE_LEN,
+        ),
+        _ => bail!("unsupported encryption suite"),
+    };
+    let expected_mode = if suite == SUITE_CHACHA20_POLY1305 {
+        EncryptionMode::Symmetric
+    } else {
+        EncryptionMode::Public
+    };
+    if std::mem::discriminant(&mode) != std::mem::discriminant(&expected_mode) {
+        bail!("selected encryption mode does not match the envelope");
+    }
+    let prefix = extract(&image, length_start + 4)?;
     let ciphertext_len =
         u32::from_be_bytes(prefix[length_start..length_start + 4].try_into()?) as usize;
-    let total_len = LOCATOR_LEN + HEADER_LEN + ciphertext_len;
+    let total_len = LOCATOR_LEN + header_len + ciphertext_len;
     let envelope = extract(&image, total_len)?;
-    let plaintext = open_envelope(&envelope, &key, context)?;
+    let plaintext = match mode {
+        EncryptionMode::Symmetric => {
+            if private_key_path.is_some() {
+                bail!("--private-key is only valid with --mode public");
+            }
+            let key_path = key_path.context("symmetric mode requires --key")?;
+            let key = load_symmetric_key(key_path)?;
+            open_envelope(&envelope, &key, context)?
+        }
+        EncryptionMode::Public => {
+            if key_path.is_some() {
+                bail!("--key is only valid with --mode symmetric");
+            }
+            let private_path = private_key_path.context("public mode requires --private-key")?;
+            let private_key = load_private_key(private_path)?;
+            open_public_envelope(&envelope, &private_key, context)?
+        }
+    };
     fs::write(output, plaintext).with_context(|| format!("writing output {}", output.display()))?;
     println!("decoded message to {}", output.display());
     Ok(())
@@ -524,6 +809,24 @@ mod tests {
         let mut envelope = make_envelope(b"message", &key, "context").unwrap();
         *envelope.last_mut().unwrap() ^= 1;
         assert!(open_envelope(&envelope, &key, "context").is_err());
+    }
+
+    #[test]
+    fn public_envelope_round_trip_and_wrong_key_rejection() {
+        let recipient_secret = [9u8; 32];
+        let recipient_public = PublicKey::from(&StaticSecret::from(recipient_secret));
+        let envelope = make_public_envelope(
+            b"public-key message",
+            recipient_public.as_bytes(),
+            "public-context",
+        )
+        .unwrap();
+        assert_eq!(
+            open_public_envelope(&envelope, &recipient_secret, "public-context").unwrap(),
+            b"public-key message"
+        );
+        assert!(open_public_envelope(&envelope, &[8u8; 32], "public-context").is_err());
+        assert!(open_public_envelope(&envelope, &recipient_secret, "wrong").is_err());
     }
 
     #[test]

@@ -5,11 +5,15 @@ codebase/.git/
 codebase/target/
 codebase/key.txt
 codebase/*.key
+codebase/*.private
+codebase/*.public
 codebase/message.txt
 codebase/encoded.png
 codebase/recovered.txt
 codebase/message-benchmark.txt
 codebase/encoded-benchmark.png
+codebase/encoded-public.png
+codebase/recovered-public.txt
 
 # Editor and OS files.
 .DS_Store

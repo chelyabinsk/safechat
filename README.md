@@ -47,6 +47,32 @@ docker compose run --rm rust-dev cargo run -- decode \
 docker compose run --rm rust-dev cargo run -- inspect /workspace/carrier.png
 ```
 
+Encryption mode can be selected explicitly. Symmetric mode uses one shared key. Public mode uses a recipient key pair; the image stores the sender's ephemeral public key and the recipient decrypts with the private key:
+
+```sh
+./codebase/target/release/safechat keygen \
+  --mode public \
+  --public-output codebase/recipient.public \
+  codebase/recipient.private
+
+./codebase/target/release/safechat encode \
+  --mode public \
+  --input codebase/message.txt \
+  --carrier codebase/carrier-small.png \
+  --output codebase/encoded-public.png \
+  --recipient-public-key codebase/recipient.public \
+  --context "public-context"
+
+./codebase/target/release/safechat decode \
+  --mode public \
+  --input codebase/encoded-public.png \
+  --output codebase/recovered-public.txt \
+  --private-key codebase/recipient.private \
+  --context "public-context"
+```
+
+Public-key mode currently provides hybrid encryption and recipient confidentiality. It does not prove who created the message; sender signatures and identity verification are a later protocol milestone.
+
 The reference-pair detector benchmark compares a clean carrier with an encoded candidate:
 
 ```sh
