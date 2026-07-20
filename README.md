@@ -124,6 +124,19 @@ safechat benchmark --clean-dir <dir> --encoded-dir <dir>
 
 Carrier writing and transport integrations are deliberately not enabled yet.
 
+## Release binaries
+
+Push a version tag from a commit on `main` to build Linux, Windows, and macOS
+release archives and attach them to a GitHub release:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow runs only for `v*` tags and rejects tags that do not point to a
+commit reachable from `main`.
+
 ## Repository layout
 
 - `codebase/` — Rust source and Cargo manifest, mounted into Docker at `/workspace`
