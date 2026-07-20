@@ -1,179 +1,137 @@
-# Rust development container
+# SafeChat
 
-This repository includes a non-root Rust development image based on Debian Bookworm. It provides Rust, Cargo, common native build dependencies, and a host-visible Rust workspace.
+SafeChat is a Rust protocol prototype using the pinned upstream Signal
+implementation. Carrier adapters and steganography are separate evaluation
+components; no custom cryptographic protocol is shipped.
 
-The architecture and implementation roadmap are documented in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md).
+Architecture and roadmap: [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md)
 
-Current protocol decisions are documented in [docs/PROTOCOL_DESIGN.md](docs/PROTOCOL_DESIGN.md).
+Signal dependency policy: [docs/SIGNAL_INTEGRATION.md](docs/SIGNAL_INTEGRATION.md)
 
-The detectability benchmark strategy is documented in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md); the detector will be developed as a separate evaluation component.
+## Run the current implementation
 
-Project source code belongs in `codebase/`. Docker mounts that folder at `/workspace`, so files created or edited in the container are available directly on the host.
-
-Build the image directly:
-
-```sh
-docker build -t safechat-rust-dev .
-```
-
-Start an interactive development shell with Docker Compose:
+Build the development image and run the official Signal session smoke test:
 
 ```sh
-docker compose run --rm rust-dev
+docker compose build rust-dev
+docker compose run --rm rust-dev cargo run --locked -- signal-demo
 ```
 
-From inside the container, normal Rust commands work as expected:
+The demo creates two SQLite-backed local devices, initializes a session from a
+prekey bundle, encrypts/decrypts messages through libsignal, and verifies that
+the session survives a restart.
+
+Run tests and strict linting:
 
 ```sh
-cargo test
-cargo run -- --help
+docker compose run --rm rust-dev cargo test --locked
+docker compose run --rm rust-dev cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
-The MVP CLI supports local PNG carriers:
+Build a standalone Linux binary:
 
 ```sh
-docker compose run --rm rust-dev cargo run -- keygen /workspace/key.txt
-docker compose run --rm rust-dev cargo run -- encode \
-  --input /workspace/message.txt \
-  --carrier /workspace/carrier.png \
-  --output /workspace/encoded.png \
-  --key /workspace/key.txt \
-  --context "shared-context"
-docker compose run --rm rust-dev cargo run -- decode \
-  --input /workspace/encoded.png \
-  --output /workspace/recovered.txt \
-  --key /workspace/key.txt \
-  --context "shared-context"
-docker compose run --rm rust-dev cargo run -- inspect /workspace/carrier.png
+docker compose run --rm rust-dev cargo build --release --locked
+./codebase/target/release/safechat --help
 ```
 
-Encryption mode can be selected explicitly. Symmetric mode uses one shared key. Public mode uses a recipient key pair plus a long-term sender identity key. The image stores the sender's ephemeral encryption key, identity public key, and signature. The recipient must verify that identity key through a trusted secondary channel:
+## Two-user Signal example
+
+The lifecycle is: initialize each local device once, export Bob's public
+bundle, verify/trust Bob's fingerprint on Alice, then encrypt and decrypt
+messages using the persistent databases.
+
+Initialize Alice and Bob:
 
 ```sh
-./codebase/target/release/safechat keygen \
-  --mode public \
-  --public-output codebase/recipient.public \
-  codebase/recipient.private
-
-./codebase/target/release/safechat keygen \
-  --mode identity \
-  --public-output codebase/sender.identity.public \
-  codebase/sender.identity.private
-
-./codebase/target/release/safechat encode \
-  --mode public \
-  --input codebase/message.txt \
-  --carrier codebase/carrier-small.png \
-  --output codebase/encoded-public.png \
-  --recipient-public-key codebase/recipient.public \
-  --sender-private-key codebase/sender.identity.private \
-  --context "public-context"
-
-./codebase/target/release/safechat decode \
-  --mode public \
-  --input codebase/encoded-public.png \
-  --output codebase/recovered-public.txt \
-  --private-key codebase/recipient.private \
-  --trusted-sender-public-key codebase/sender.identity.public \
-  --context "public-context"
+docker compose run --rm rust-dev cargo run --locked -- signal init \
+  --database /workspace/alice.db --user alice
+docker compose run --rm rust-dev cargo run --locked -- signal init \
+  --database /workspace/bob.db --user bob
 ```
 
-Public-key mode provides hybrid encryption, recipient confidentiality, and sender authentication. The embedded identity public key is not trusted by itself; decoding requires the expected sender public key and rejects mismatches or invalid signatures. A compromised or replaced identity still requires user-managed out-of-band rotation.
-
-The initial Signal-like handshake establishes a shared session key. Verify identity fingerprints through your separate secure channel before accepting them:
-
-~~~sh
-safechat keygen --mode public --public-output recipient.public recipient.private
-safechat keygen --mode public --public-output recipient.prekey.public recipient.prekey.private
-safechat keygen --mode identity --public-output recipient.identity.public recipient.identity.private
-safechat prekey-cert --recipient-public-key recipient.public --prekey-public-key recipient.prekey.public --identity-private-key recipient.identity.private --output recipient.prekey.cert
-safechat keygen --mode identity --public-output sender.identity.public sender.identity.private
-safechat fingerprint sender.identity.public
-
-safechat handshake-init --output handshake.txt --session-output sender.session \
-  --recipient-public-key recipient.public \
-  --recipient-identity-public-key recipient.identity.public \
-  --recipient-prekey-public-key recipient.prekey.public \
-  --recipient-prekey-certificate recipient.prekey.cert \
-  --sender-identity-private-key sender.identity.private
-
-safechat handshake-accept --input handshake.txt --output recipient.session \
-  --recipient-private-key recipient.private \
-  --recipient-prekey-private-key recipient.prekey.private \
-  --recipient-identity-private-key recipient.identity.private \
-  --trusted-sender-identity-public-key sender.identity.public
-~~~
-
-This is a custom, versioned X3DH-like bootstrap. It is not interoperable with Signal and does not yet include Double Ratchet message keys, persistent replay state, or post-compromise recovery. The resulting session files can be supplied to symmetric text encoding and decoding with --key.
-
-The carrier-independent text mode uses the same encryption and authentication but writes a URL-safe textual envelope instead of modifying an image. It is useful for testing the communication protocol and sending ordinary chat messages, but it does not provide steganographic cover:
+Export Bob's bundle and note the printed fingerprint:
 
 ```sh
-./codebase/target/release/safechat text-encode \
-  --mode public \
-  --input codebase/message.txt \
-  --output encrypted-message.txt \
-  --recipient-public-key codebase/recipient.public \
-  --sender-private-key codebase/sender.identity.private \
-  --context "public-context"
-
-./codebase/target/release/safechat text-decode \
-  --mode public \
-  --input encrypted-message.txt \
-  --output recovered-text.txt \
-  --private-key codebase/recipient.private \
-  --trusted-sender-public-key codebase/sender.identity.public \
-  --context "public-context"
+docker compose run --rm rust-dev cargo run --locked -- signal bundle \
+  --database /workspace/bob.db --output /workspace/bob.bundle
 ```
 
-The text output begins with `safechat-text-v1:` and is URL-safe Base64, so it can be copied through a chat transport without binary data handling. The text mode currently has the same message-size limitations as the underlying MVP envelope.
+For a text-only channel, add `--base64` to `signal bundle` and `signal trust`.
+The output is prefixed with `safechat-bundle-v1:` and remains a public bundle;
+verify its fingerprint through the separate trusted channel before trusting it.
 
-The Rust implementation keeps this split explicit: `codebase/src/transport.rs` owns the reference text transport, while `codebase/src/carrier.rs` defines the carrier adapter boundary and contains the initial `PngCarrier`. Future GIF, audio, and video support should implement that boundary without changing the authenticated protocol or text transport.
-
-The reference-pair detector benchmark compares a clean carrier with an encoded candidate:
+Alice also exports her bundle so Bob can verify Alice before accepting her
+messages:
 
 ```sh
-./codebase/target/release/safechat detect \
-  --reference codebase/carrier-small.png \
-  --candidate codebase/encoded.png
+docker compose run --rm rust-dev cargo run --locked -- signal bundle \
+  --database /workspace/alice.db --output /workspace/alice.bundle
 ```
 
-This first detector is an oracle benchmark because it has the original carrier. It measures changed RGB LSBs and is not yet a blind detector.
-
-The experimental blind baseline uses only the candidate image:
+On Alice's device, trust that bundle only after comparing its fingerprint
+through the separate trusted channel:
 
 ```sh
-./codebase/target/release/safechat blind-detect \
-  codebase/encoded-benchmark.png \
-  --window-bits 512 \
-  --threshold 0.05
+docker compose run --rm rust-dev cargo run --locked -- signal trust \
+  --database /workspace/alice.db --bundle /workspace/bob.bundle \
+  --fingerprint <verified-bob-fingerprint>
 ```
 
-The threshold is not calibrated for production use. In the current experiment, the tiny 47-byte payload was not flagged, while a 520-byte payload was flagged. This is a development benchmark for finding the embedding method's operating boundary.
-
-The corpus benchmark fits a threshold over clean and encoded directories:
+On Bob's device, verify Alice's printed fingerprint through the same trusted
+channel and trust Alice's bundle:
 
 ```sh
-./codebase/target/release/safechat benchmark \
-  --clean-dir /path/to/clean-pngs \
-  --encoded-dir /path/to/encoded-pngs \
-  --window-bits 512
+docker compose run --rm rust-dev cargo run --locked -- signal trust \
+  --database /workspace/bob.db --bundle /workspace/alice.bundle \
+  --fingerprint <verified-alice-fingerprint>
 ```
 
-Its accuracy is only meaningful with a representative corpus and disjoint evaluation data. The current local result uses two clean and two encoded samples and is therefore exploratory only.
-
-The key file and message/carrier files are in `codebase/` on the host because Docker mounts that directory at `/workspace`. This MVP intentionally supports PNG only; GIF, audio, video, richer key exchange, and error correction are future adapters/features.
-
-The sample application lives in `codebase/`. That directory is mounted at `/workspace`, so its Rust source files are available on the host at `codebase/src/main.rs` and can be edited there. Set `UID` and `GID` when building through Compose if the host user is not `1000`:
+Alice can now send Bob a message:
 
 ```sh
-UID=$(id -u) GID=$(id -g) docker compose build
+docker compose run --rm rust-dev cargo run --locked -- signal encrypt \
+  --database /workspace/alice.db --bundle /workspace/bob.bundle \
+  --input /workspace/alice.txt --output /workspace/message.ciphertext
 ```
 
-Git is initialized at the project root, so use normal Git commands from the repository root:
+Bob decrypts it:
 
 ```sh
-git status
-git add .
-git commit -m "Initial project"
+docker compose run --rm rust-dev cargo run --locked -- signal decrypt \
+  --database /workspace/bob.db --sender alice \
+  --input /workspace/message.ciphertext --output /workspace/bob.txt
 ```
+
+The database files preserve identity, trust, prekeys, and session state.
+Repeat only `signal encrypt` and `signal decrypt` for subsequent messages.
+
+For text-only transports, add `--base64` to both commands. This wraps the
+binary Signal envelope in URL-safe Base64; it does not replace encryption or
+authentication. Without the flag, ciphertext files are binary.
+
+## Other current commands
+
+The CLI also exposes protocol validation and detector commands:
+
+```text
+safechat signal-demo
+safechat inspect <PNG>
+safechat detect --reference <clean.png> --candidate <candidate.png>
+safechat blind-detect <PNG> --window-bits 1024 --threshold 0.05
+safechat benchmark --clean-dir <dir> --encoded-dir <dir>
+```
+
+Carrier writing and transport integrations are deliberately not enabled yet.
+
+## Repository layout
+
+- `codebase/` — Rust source and Cargo manifest, mounted into Docker at `/workspace`
+- `codebase/src/signal_adapter.rs` — SafeChat boundary around upstream libsignal
+- `codebase/src/carrier.rs` — carrier abstraction and evaluation PNG adapter
+- `codebase/src/transport.rs` — carrier-neutral text reference transport
+- `docs/` — design, protocol, and operational documentation
+
+The detector is a benchmark, not a security claim. Its baseline recognizes the
+current evaluation carrier behavior and must be calibrated against disjoint,
+representative corpora.

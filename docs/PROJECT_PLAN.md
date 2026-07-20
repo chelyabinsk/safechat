@@ -8,7 +8,7 @@ The first release should support images/GIFs well, then expand through independe
 
 ## Design principles
 
-- Do not implement cryptographic primitives ourselves.
+- Do not implement cryptographic primitives or messaging protocols ourselves. Use the pinned upstream Signal implementation through the SafeChat adapter.
 - Keep encryption independent from steganographic encoding.
 - Use versioned, authenticated protocol messages.
 - Treat every media format according to its capacity and re-encoding behavior.
@@ -23,8 +23,8 @@ stegano/
 ├── crates/
 │   ├── core/          # Shared types, configuration, and errors
 │   ├── envelope/      # Framed payload format
-│   ├── crypto/        # Encryption, signatures, and key agreement
-│   ├── protocol/      # Handshake and authenticated control messages
+│   ├── crypto/        # Signal adapter only; no application-defined cryptography
+│   ├── protocol/      # Signal session lifecycle and SafeChat policy
 │   ├── stego/         # Medium-independent carrier interface
 │   ├── image/         # PNG, JPEG, WebP, and BMP adapters
 │   ├── animation/     # GIF and animated image adapters
@@ -72,52 +72,14 @@ Payloads may use bounded error correction inspired by QR systems. Error correcti
 
 Use established libraries and protocols rather than writing cryptographic primitives.
 
-Initial algorithm suite:
-
-- X25519 for key agreement
-- Ed25519 for identity signatures
-- HKDF-SHA256 for key derivation
-- ChaCha20-Poly1305 as the initial AEAD
-- AES-256-GCM as an optional additional suite
-
-The application should expose an algorithm registry with stable identifiers. Each suite must define its key sizes, nonce rules, authentication behavior, and compatibility requirements.
-
-The implementation should support one suite completely before adding alternatives. The MVP now exposes symmetric mode and a hybrid X25519/ChaCha20-Poly1305 recipient-encryption mode. Algorithm changes must be negotiated and authenticated, never silently selected from unauthenticated input.
-
-In public-key mode, the sender generates an ephemeral X25519 key pair, derives a one-time AEAD key with the recipient public key, and stores the ephemeral public key in the envelope. The sender also signs the authenticated envelope fields with a long-term Ed25519 identity key and stores the identity public key alongside the ephemeral key. The recipient must compare that embedded key with a trusted key provisioned out of band before accepting the message. This provides recipient confidentiality, forward secrecy for that message, and sender authentication; identity rotation and revocation remain explicit protocol work.
+The cryptographic implementation is the pinned upstream Signal `libsignal-protocol` crate. SafeChat must not expose a second application-defined cipher suite or negotiate algorithms independently of that library. Signal session state, prekeys, identity trust, ratcheting, and ciphertext serialization belong behind `signal_adapter.rs`; SafeChat adds only carrier framing, bounded padding/chunking, persistence transactions, and transport policy.
 
 ## Handshake and sessions
 
-Use an established handshake pattern, preferably a Noise Protocol Framework pattern or a well-reviewed equivalent, rather than inventing a new key exchange.
-
-Each identity should have:
-
-- a long-term signing key pair
-- a public identity fingerprint
-- separately generated ephemeral session keys
-
-The handshake should provide:
-
-1. identity or pre-shared-key authentication
-2. ephemeral key exchange
-3. transcript authentication
-4. session key derivation
-5. algorithm negotiation
-6. replay protection
-7. explicit session confirmation
-8. rekey support
-
-A session can be represented by:
-
-```text
-session_id
-peer_identity
-encryption_suite
-send_key
-receive_key
-send_counter
-receive_counter
-```
+Use the upstream Signal session establishment and ratchet implementation. The
+SafeChat adapter owns only lifecycle policy, SQLite persistence, carrier-neutral
+framing, and delivery state. It must not expose or reimplement Signal’s key
+agreement, identity signatures, ratchet, or cipher selection.
 
 Private keys must never be embedded in a carrier or written to logs. Key export should require an explicit command and use a protected format.
 
@@ -204,16 +166,13 @@ Begin with a narrow, documented container/codec combination. Treat video as a st
 
 ## CLI outline
 
-Initial commands:
+Future user-facing commands:
 
 ```text
-stegano keygen
-stegano key inspect
-stegano encode --input message.txt --carrier image.png --output encoded.png
-stegano decode --input encoded.png --output message.txt
-stegano inspect --input image.png
-stegano handshake initiate ...
-stegano handshake accept ...
+safechat signal init --database alice.db
+safechat signal encrypt --database alice.db ...
+safechat signal decrypt --database alice.db ...
+safechat inspect --input image.png
 ```
 
 The CLI should refuse to overwrite the input carrier unless explicitly requested. `inspect` should report capacity, format, estimated overhead, and compatibility warnings without exposing plaintext.
@@ -223,20 +182,22 @@ The CLI should refuse to overwrite the input carrier unless explicitly requested
 ### Milestone 1: secure core
 
 - Cargo workspace foundations
-- envelope serialization and parsing
-- ChaCha20-Poly1305 encryption
-- key generation and protected key files
-- PNG adapter
-- `keygen`, `encode`, `decode`, and `inspect` commands
+- carrier-neutral envelope serialization and parsing
+- pinned upstream Signal integration
+- SQLite-backed identity, prekey, and session state
+- PNG detector/evaluation adapter
+- `signal-demo`, `inspect`, and detector commands
 
-### Milestone 2: authenticated sessions
+### Milestone 2: upstream Signal sessions
 
-- X25519 and Ed25519 identities
-- handshake transcript
-- session encryption
-- replay protection
-- rekey control message
-- protocol version negotiation
+- Pin and compile the official libsignal implementation
+- Build a SafeChat-owned adapter around Signal stores and ciphertexts
+- Migrate identity/prekey/session state into SQLite-backed adapter stores
+- Verify session initialization, encryption/decryption, and restart recovery
+- Provide persistent `signal init`, `bundle`, `trust`, `encrypt`, and `decrypt` commands
+- Keep custom handshake, session, and ratchet code absent from the production path
+- Add golden ciphertext fixtures and upstream compatibility tests
+- Preserve carrier-independent message transport APIs
 
 Protocol version policy must define a minimum accepted version, an upgrade path, and a clear rejection error. If old versions are intentionally unsupported, the transition must be announced and tested before enforcement; otherwise rejecting old data can become an avoidable availability failure.
 
@@ -290,8 +251,8 @@ The next protocol milestone is defined in [docs/MESSAGE_PROTOCOL.md](MESSAGE_PRO
 
 The secure communication layer is the project baseline. Carrier embedding is intentionally downstream of it.
 
-1. Implement the custom-key, Signal-inspired identity and prekey handshake with mandatory fingerprint verification.
-2. Establish authenticated session state, message keys, replay handling, rotation, and recovery over the text transport.
+1. Expand the user-facing Signal commands with explicit peer/session status and key lifecycle operations.
+2. Establish durable authenticated message state, replay handling, rotation, and recovery over the text transport.
 3. Treat encrypted text as the reference transport for protocol tests and interoperability fixtures.
 4. Add PNG and GIF carrier adapters without changing the message or session protocol.
 5. Add audio and video adapters only after their transformation profiles and recovery behavior are independently tested.
@@ -308,12 +269,11 @@ The first implementation may expose a `blind-detect` command that reports a repr
 
 ## Immediate next steps
 
-1. Convert the current sample into a Cargo workspace.
-2. Define the envelope types and serialization format.
-3. Add a crypto crate using one reviewed AEAD suite.
-4. Implement a PNG adapter behind the carrier trait.
-5. Add round-trip, corruption, and size-limit tests.
-6. Add key generation only after the encrypted envelope is stable.
-7. Design the handshake against a selected Noise pattern.
-8. Create the detector corpus and baseline before making further embedding changes.
-9. Add detector evaluation to carrier-profile and release review.
+1. Replace the snapshot wrapper with direct SQLite implementations of the upstream
+   store traits where concurrency and performance require it.
+2. Implement signed-prekey rotation, one-time-prekey low-watermark replenishment,
+   stale-key monitoring, identity replacement, device revocation, and
+   out-of-band fingerprint re-verification.
+3. Add crash-injection, prekey-consumption, rotation, recovery, replay,
+   out-of-order, and database migration tests.
+4. Define the carrier-neutral transport API and then add carrier adapters.

@@ -6,12 +6,12 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
-chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
-ed25519-dalek = "2"
-hmac = "0.12"
-hkdf = "0.12"
 png = "0.17"
-rand = "0.8"
-sha2 = "0.10"
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Pinned upstream Signal protocol implementation. Keep this dependency behind
+# the adapter boundary so upstream updates are reviewed in one place.
+signal-protocol = { package = "libsignal-protocol", git = "https://github.com/signalapp/libsignal.git", rev = "b5121d07c72f9e631f178d907ca892587f64f9e2" }
+futures-executor = "0.3"
+signal-rand = { package = "rand", version = "0.9" }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{Context, Result, bail};
 
 /// Decoded carrier pixels used by the PNG adapter and future media adapters.

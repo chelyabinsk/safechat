@@ -20,8 +20,8 @@ The carrier is not trusted for identity, freshness, ordering, or capability nego
 
 Each participant has:
 
-1. a long-term Ed25519 identity key pair;
-2. one or more X25519 recipient encryption keys or prekeys;
+1. a libsignal identity key pair;
+2. libsignal signed, one-time, and post-quantum prekeys as applicable;
 3. a locally stored trust record for the peer identity;
 4. an epoch-specific replay and delivery record.
 
@@ -56,7 +56,7 @@ sender_signature        64 bytes
 
 The signature covers every field above except `sender_signature`, including the recipient key identifier, epoch, message ID, timestamps, chunk fields, and encrypted payload. The associated data for AEAD covers the same routing and protocol fields needed to prevent cross-context substitution.
 
-The current MVP does not yet implement all of these fields. Its existing authenticated public envelope is the cryptographic foundation. The code now also provides a versioned X3DH-like bootstrap with signed recipient prekeys and fingerprint-gated sender verification; this produces a shared session key but is not yet a Double Ratchet.
+The cryptographic session layer uses the pinned upstream Signal implementation behind `signal_adapter.rs`. SafeChat’s protocol surface contains Signal ciphertexts plus carrier-neutral framing, transport metadata, bounded padding/chunking, and SQLite delivery transactions; it does not redefine X3DH, identity signatures, or Double Ratchet.
 
 ## 4. Message identity and replay handling
 
@@ -74,7 +74,7 @@ Before delivery, the receiver must:
 4. reject an already completed message;
 5. store acceptance atomically with application delivery state.
 
-Replayed chunks must not cause a second application-level delivery. Duplicate and out-of-order chunks may be retained only within a bounded pending-message window.
+Replayed chunks must not cause a second application-level delivery. The current session-message mode supports a bounded skipped-key window for out-of-order messages; the full protocol still requires durable pending-message and chunk state.
 
 Freshness is not inferred from the carrier upload time. Carrier timestamps and filenames are untrusted metadata.
 
@@ -163,9 +163,10 @@ Parsing must enforce maximum values before allocation:
 2. Add created/expiry timestamps and strict bounds.
 3. Add chunk fields and message-level digest.
 4. Add a small persistent replay/delivery store.
-5. Add a Double Ratchet-style send/receive chain over the established session.
-6. Add epoch records and authenticated rotation transitions.
-7. Add recovery fixtures for identity replacement and revoked epochs.
-8. Add golden wire fixtures and cross-version rejection tests.
+5. Exercise the upstream Signal adapter and persisted stores through user-facing session commands; do not add a second cryptographic session layer.
+6. Add a durable SQLite replay/delivery store with outbox semantics and rollback detection.
+7. Add epoch records and authenticated rotation transitions.
+8. Add recovery fixtures for identity replacement and revoked epochs.
+9. Add golden wire fixtures and cross-version rejection tests.
 
 No carrier adapter should implement its own replay, identity, or rotation logic.

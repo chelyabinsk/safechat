@@ -14,6 +14,14 @@ codebase/message-benchmark.txt
 codebase/encoded-benchmark.png
 codebase/encoded-public.png
 codebase/recovered-public.txt
+codebase/*.db
+codebase/*.bundle
+codebase/*.ciphertext
+codebase/alice.txt
+codebase/bob.txt
+
+# Local two-user demo state and plaintext/ciphertext samples.
+demo/
 
 # Editor and OS files.
 .DS_Store

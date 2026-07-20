@@ -10,6 +10,7 @@ RUN apt-get update \
         ca-certificates \
         pkg-config \
         libssl-dev \
+        protobuf-compiler \
         git \
         curl \
         sudo \
