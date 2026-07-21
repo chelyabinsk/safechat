@@ -316,7 +316,24 @@ fn chat_loop(
     println!("Type /help for commands.");
     loop {
         let command = Input::<String>::new().with_prompt("> ").interact_text()?;
-        match command.trim() {
+        let command = command.trim();
+        if let Some(message) = command.strip_prefix("/s ") {
+            if message.trim().is_empty() {
+                println!("Usage: /s <plain text>");
+            } else {
+                send_plaintext(paths, password, history, state, &peer, message.as_bytes())?;
+            }
+            continue;
+        }
+        if let Some(ciphertext) = command.strip_prefix("/r ") {
+            if ciphertext.trim().is_empty() {
+                println!("Usage: /r <ciphertext>");
+            } else {
+                receive_ciphertext(paths, password, history, state, &peer, ciphertext)?;
+            }
+            continue;
+        }
+        match command {
             "/help" => print_help(),
             "/send" => send_message(paths, password, history, state, &peer)?,
             "/receive" => receive_message(paths, password, history, state, &peer)?,
@@ -344,6 +361,8 @@ fn chat_loop(
 }
 
 fn print_help() {
+    println!("/s <text>  encrypt and print a message's ciphertext");
+    println!("/r <cipher> decrypt and print a ciphertext's message");
     println!("/send      compose a message or choose a plaintext file");
     println!("/receive   open a ciphertext file or paste ciphertext");
     println!("/clean     show only the readable chat");
@@ -381,15 +400,38 @@ fn send_message(
         _ => return Ok(()),
     };
     let envelope = futures_executor::block_on(state.encrypt_for(peer, &plaintext))?;
+    send_envelope(paths, password, history, &plaintext, &envelope)?;
+    Ok(())
+}
+
+fn send_plaintext(
+    paths: &ProfilePaths,
+    password: &str,
+    history: &mut HistoryFile,
+    state: &mut SqliteSignalState,
+    peer: &SignalPreKeyBundle,
+    plaintext: &[u8],
+) -> Result<()> {
+    let envelope = futures_executor::block_on(state.encrypt_for(peer, plaintext))?;
+    send_envelope(paths, password, history, plaintext, &envelope)
+}
+
+fn send_envelope(
+    paths: &ProfilePaths,
+    password: &str,
+    history: &mut HistoryFile,
+    plaintext: &[u8],
+    envelope: &[u8],
+) -> Result<()> {
     let path = paths
         .outbox
         .join(format!("message-{}.safechat", unique_id()));
-    let ciphertext = TextTransport.encode(&envelope).trim().to_owned();
+    let ciphertext = TextTransport.encode(envelope).trim().to_owned();
     fs::write(&path, &ciphertext)?;
     history.entries.push(HistoryEntry {
         timestamp: now(),
         sender: "you".to_owned(),
-        text: String::from_utf8_lossy(&plaintext).into_owned(),
+        text: String::from_utf8_lossy(plaintext).into_owned(),
         ciphertext: ciphertext.clone(),
     });
     save_history(&paths.history, password, history)?;
@@ -427,13 +469,36 @@ fn receive_message(
         }
         _ => return Ok(()),
     };
-    let plaintext = futures_executor::block_on(state.decrypt_from(&peer.address(), &envelope))?;
+    receive_envelope(paths, password, history, state, peer, &envelope)
+}
+
+fn receive_ciphertext(
+    paths: &ProfilePaths,
+    password: &str,
+    history: &mut HistoryFile,
+    state: &mut SqliteSignalState,
+    peer: &SignalPreKeyBundle,
+    ciphertext: &str,
+) -> Result<()> {
+    let envelope = TextTransport.decode(ciphertext)?;
+    receive_envelope(paths, password, history, state, peer, &envelope)
+}
+
+fn receive_envelope(
+    paths: &ProfilePaths,
+    password: &str,
+    history: &mut HistoryFile,
+    state: &mut SqliteSignalState,
+    peer: &SignalPreKeyBundle,
+    envelope: &[u8],
+) -> Result<()> {
+    let plaintext = futures_executor::block_on(state.decrypt_from(&peer.address(), envelope))?;
     let text = String::from_utf8(plaintext).context("decrypted message is not UTF-8 text")?;
     history.entries.push(HistoryEntry {
         timestamp: now(),
         sender: peer.name.clone(),
         text: text.clone(),
-        ciphertext: TextTransport.encode(&envelope).trim().to_owned(),
+        ciphertext: TextTransport.encode(envelope).trim().to_owned(),
     });
     save_history(&paths.history, password, history)?;
     println!("{}: {}", peer.name, text);

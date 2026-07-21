@@ -128,6 +128,15 @@ saved in `outbox/`. To receive a message, choose `Type or paste ciphertext`
 first and press Enter after pasting the single-line ciphertext. File input is
 the second option.
 
+For quick manual chat, use the shortcuts directly at the prompt:
+
+```text
+/s hello Bob
+/r safechat-text-v1:...
+```
+
+`/s` prints the ciphertext in the chat; `/r` prints the decrypted message.
+
 The release archives contain both `safechat` and `safechat-ui` binaries.
 
 For text-only transports, add `--base64` to both commands. This wraps the
