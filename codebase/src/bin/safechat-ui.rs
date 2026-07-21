@@ -1,5 +1,6 @@
 use age::{Decryptor, Encryptor};
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use dialoguer::{Confirm, Input, Password, Select};
 use directories::ProjectDirs;
 use safechat::signal_adapter::{SignalPreKeyBundle, SqliteSignalState, identity_fingerprint};
@@ -44,6 +45,14 @@ struct HistoryEntry {
     timestamp: u64,
     sender: String,
     text: String,
+    #[serde(default)]
+    ciphertext: String,
+}
+
+#[derive(Clone, Copy)]
+enum HistoryView {
+    Ciphertext,
+    Clean,
 }
 
 fn main() -> Result<()> {
@@ -67,7 +76,8 @@ fn main() -> Result<()> {
         peer = Some(futures_executor::block_on(setup_peer(&paths, &mut state))?);
     }
 
-    show_history(&history);
+    let view = choose_history_view()?;
+    show_history(&history, view);
     chat_loop(
         &paths,
         &password,
@@ -280,6 +290,20 @@ fn normalize_fingerprint(value: &str) -> String {
         .collect()
 }
 
+fn choose_history_view() -> Result<HistoryView> {
+    let choices = ["Show encrypted chat", "Show clean chat"];
+    let choice = Select::new()
+        .with_prompt("History view")
+        .items(&choices)
+        .default(0)
+        .interact()?;
+    Ok(if choice == 0 {
+        HistoryView::Ciphertext
+    } else {
+        HistoryView::Clean
+    })
+}
+
 fn chat_loop(
     paths: &ProfilePaths,
     password: &str,
@@ -296,6 +320,8 @@ fn chat_loop(
             "/help" => print_help(),
             "/send" => send_message(paths, password, history, state, &peer)?,
             "/receive" => receive_message(paths, password, history, state, &peer)?,
+            "/clean" => show_history(history, HistoryView::Clean),
+            "/cipher" => show_history(history, HistoryView::Ciphertext),
             "/bundle" => {
                 let bundle = futures_executor::block_on(state.export_bundle())?;
                 let path = paths.outbox.join("my-bundle.txt");
@@ -320,6 +346,8 @@ fn chat_loop(
 fn print_help() {
     println!("/send      compose a message or choose a plaintext file");
     println!("/receive   open a ciphertext file or paste ciphertext");
+    println!("/clean     show only the readable chat");
+    println!("/cipher    show the copyable encrypted chat");
     println!("/bundle    export your current public bundle");
     println!("/fingerprint  show your identity fingerprint");
     println!("/quit      close the chat");
@@ -361,6 +389,7 @@ fn send_message(
         timestamp: now(),
         sender: "you".to_owned(),
         text: String::from_utf8_lossy(&plaintext).into_owned(),
+        ciphertext: TextTransport.encode(&envelope).trim().to_owned(),
     });
     save_history(&paths.history, password, history)?;
     println!("Encrypted message written to {}", path.display());
@@ -397,6 +426,7 @@ fn receive_message(
         timestamp: now(),
         sender: peer.name.clone(),
         text: text.clone(),
+        ciphertext: TextTransport.encode(&envelope).trim().to_owned(),
     });
     save_history(&paths.history, password, history)?;
     println!("{}: {}", peer.name, text);
@@ -429,13 +459,23 @@ fn paste_ciphertext() -> Result<Vec<u8>> {
     TextTransport.decode(&text)
 }
 
-fn show_history(history: &HistoryFile) {
+fn show_history(history: &HistoryFile, view: HistoryView) {
     if history.entries.is_empty() {
+        println!("No messages yet.");
         return;
     }
     println!("Chat history:");
     for entry in &history.entries {
-        println!("{}: {}", entry.sender, entry.text);
+        let timestamp = DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0).map_or_else(
+            || "unknown time".to_owned(),
+            |date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        );
+        match view {
+            HistoryView::Ciphertext => {
+                println!("[{timestamp}] {}: {}", entry.sender, entry.ciphertext)
+            }
+            HistoryView::Clean => println!("[{timestamp}] {}: {}", entry.sender, entry.text),
+        }
     }
     println!();
 }
@@ -506,6 +546,7 @@ mod tests {
                 timestamp: 1,
                 sender: "alice".to_owned(),
                 text: "private message".to_owned(),
+                ciphertext: "safechat-text-v1:test".to_owned(),
             }],
         };
         save_history(&path, "correct password", &history).unwrap();

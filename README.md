@@ -116,9 +116,12 @@ docker compose run --rm rust-dev cargo run --locked --bin safechat-ui
 
 It guides first-time setup, writes public bundles and outgoing ciphertext to
 the profile's `outbox/` directory, accepts incoming ciphertext from a file or
-paste, and displays the decrypted chat history after unlocking it with the
-profile password. The profile uses the platform application-data directory;
-use `--profile NAME` to keep identities separate.
+paste, and displays chat history after unlocking it with the profile password.
+At login, the first option shows copyable encrypted chat (ciphertext); the
+second shows clean, readable chat. Both views include UTC timestamps. During
+a session, `/cipher` switches to ciphertext history and `/clean` switches to
+the readable history. The profile uses the platform application-data
+directory; use `--profile NAME` to keep identities separate.
 
 The release archives contain both `safechat` and `safechat-ui` binaries.
 

@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0"
 age = "0.11"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.5", features = ["derive"] }
 directories = "6.0"
 dialoguer = "0.11"
