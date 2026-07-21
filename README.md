@@ -106,6 +106,22 @@ docker compose run --rm rust-dev cargo run --locked -- signal decrypt \
 The database files preserve identity, trust, prekeys, and session state.
 Repeat only `signal encrypt` and `signal decrypt` for subsequent messages.
 
+## Friendly manual-chat UI
+
+Build and run the separate interactive UI:
+
+```sh
+docker compose run --rm rust-dev cargo run --locked --bin safechat-ui
+```
+
+It guides first-time setup, writes public bundles and outgoing ciphertext to
+the profile's `outbox/` directory, accepts incoming ciphertext from a file or
+paste, and displays the decrypted chat history after unlocking it with the
+profile password. The profile uses the platform application-data directory;
+use `--profile NAME` to keep identities separate.
+
+The release archives contain both `safechat` and `safechat-ui` binaries.
+
 For text-only transports, add `--base64` to both commands. This wraps the
 binary Signal envelope in URL-safe Base64; it does not replace encryption or
 authentication. Without the flag, ciphertext files are binary.

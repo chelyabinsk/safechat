@@ -4,11 +4,12 @@ use png::{ColorType, Decoder, Transformations};
 use std::{fs, path::PathBuf};
 
 mod carrier;
-pub mod signal_adapter;
-mod transport;
 
 use carrier::{CarrierAdapter, PngCarrier, RgbaImage};
-use transport::{BundleTransport, TextTransport};
+use safechat::{
+    signal_adapter,
+    transport::{BundleTransport, TextTransport},
+};
 
 #[derive(Parser)]
 #[command(
@@ -301,7 +302,9 @@ fn read_bundle_bytes(path: &PathBuf) -> Result<Vec<u8>> {
     let bytes =
         fs::read(path).with_context(|| format!("reading Signal bundle {}", path.display()))?;
     if let Ok(text) = std::str::from_utf8(&bytes)
-        && text.trim_start().starts_with(transport::BUNDLE_HEADER)
+        && text
+            .trim_start()
+            .starts_with(safechat::transport::BUNDLE_HEADER)
     {
         return BundleTransport.decode(text);
     }
