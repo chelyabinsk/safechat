@@ -384,15 +384,18 @@ fn send_message(
     let path = paths
         .outbox
         .join(format!("message-{}.safechat", unique_id()));
-    fs::write(&path, TextTransport.encode(&envelope))?;
+    let ciphertext = TextTransport.encode(&envelope).trim().to_owned();
+    fs::write(&path, &ciphertext)?;
     history.entries.push(HistoryEntry {
         timestamp: now(),
         sender: "you".to_owned(),
         text: String::from_utf8_lossy(&plaintext).into_owned(),
-        ciphertext: TextTransport.encode(&envelope).trim().to_owned(),
+        ciphertext: ciphertext.clone(),
     });
     save_history(&paths.history, password, history)?;
     println!("Encrypted message written to {}", path.display());
+    println!("Ciphertext to send:");
+    println!("{ciphertext}");
     Ok(())
 }
 
@@ -403,21 +406,25 @@ fn receive_message(
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
 ) -> Result<()> {
-    let choices = ["Open a ciphertext file", "Paste ciphertext", "Cancel"];
+    let choices = [
+        "Type or paste ciphertext",
+        "Open a ciphertext file",
+        "Cancel",
+    ];
     let choice = Select::new()
         .with_prompt("Receive")
         .items(&choices)
         .default(0)
         .interact()?;
     let envelope = match choice {
-        0 => {
+        0 => paste_ciphertext()?,
+        1 => {
             let path = Input::<String>::new()
                 .with_prompt("Ciphertext file")
                 .interact_text()?;
             let path = PathBuf::from(path);
             read_ciphertext(&path)?
         }
-        1 => paste_ciphertext()?,
         _ => return Ok(()),
     };
     let plaintext = futures_executor::block_on(state.decrypt_from(&peer.address(), &envelope))?;
@@ -446,16 +453,9 @@ fn read_ciphertext(path: &Path) -> Result<Vec<u8>> {
 }
 
 fn paste_ciphertext() -> Result<Vec<u8>> {
-    println!("Paste the ciphertext, then enter END on its own line.");
-    let mut text = String::new();
-    loop {
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        if line.trim() == "END" {
-            break;
-        }
-        text.push_str(&line);
-    }
+    let text = Input::<String>::new()
+        .with_prompt("Ciphertext (paste, then press Enter)")
+        .interact_text()?;
     TextTransport.decode(&text)
 }
 

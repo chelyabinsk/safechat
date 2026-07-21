@@ -123,6 +123,11 @@ a session, `/cipher` switches to ciphertext history and `/clean` switches to
 the readable history. The profile uses the platform application-data
 directory; use `--profile NAME` to keep identities separate.
 
+After `/send`, the complete ciphertext is printed in the terminal as well as
+saved in `outbox/`. To receive a message, choose `Type or paste ciphertext`
+first and press Enter after pasting the single-line ciphertext. File input is
+the second option.
+
 The release archives contain both `safechat` and `safechat-ui` binaries.
 
 For text-only transports, add `--base64` to both commands. This wraps the
