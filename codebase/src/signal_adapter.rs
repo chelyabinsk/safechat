@@ -31,6 +31,7 @@ const ENVELOPE_HEADER_LEN: usize = ENVELOPE_MAGIC.len() + 1 + 4;
 const MAX_CIPHERTEXT_LEN: usize = 16 * 1024 * 1024;
 const BUNDLE_MAGIC: &[u8] = b"safechat-signal-bundle-v1\0";
 const RECOVERY_MAGIC: &[u8] = b"safechat-signal-recovery-v1\0";
+const MESSAGE_MAGIC: &[u8] = b"safechat-message-v1\0";
 const MAX_BUNDLE_FIELD_LEN: usize = 16 * 1024;
 const PREKEY_LOW_WATERMARK: usize = 8;
 const PREKEY_TARGET: usize = 32;
@@ -136,6 +137,69 @@ impl IdentityRecoveryRecord {
 pub struct SignalEnvelope {
     pub message_type: u8,
     pub ciphertext: Vec<u8>,
+}
+
+/// Application-level message identity carried inside the authenticated Signal
+/// plaintext. Signal protects the session; SafeChat uses this ID to avoid
+/// writing one logical message to history more than once.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct MessageId([u8; 16]);
+
+impl MessageId {
+    pub fn generate() -> Self {
+        let mut rng = signal_rand::rngs::OsRng.unwrap_err();
+        Self(rng.random())
+    }
+
+    pub fn encode(self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn bytes(self) -> [u8; 16] {
+        self.0
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self(bytes.try_into().map_err(|_| {
+            anyhow::anyhow!("invalid message ID length")
+        })?))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SafeChatMessage {
+    pub id: MessageId,
+    pub plaintext: Vec<u8>,
+}
+
+impl SafeChatMessage {
+    pub fn new(plaintext: &[u8]) -> Self {
+        Self {
+            id: MessageId::generate(),
+            plaintext: plaintext.to_vec(),
+        }
+    }
+
+    fn encode(&self) -> Result<Vec<u8>> {
+        let length = u32::try_from(self.plaintext.len()).context("message length overflow")?;
+        let mut output = MESSAGE_MAGIC.to_vec();
+        output.extend(self.id.bytes());
+        output.extend(length.to_be_bytes());
+        output.extend(&self.plaintext);
+        Ok(output)
+    }
+
+    fn decode(input: &[u8]) -> Result<Self> {
+        let mut reader = BundleReader { input, offset: 0 };
+        reader.expect(MESSAGE_MAGIC)?;
+        let id = MessageId::from_bytes(&reader.take(16)?)?;
+        let length = reader.u32()? as usize;
+        let plaintext = reader.take(length)?;
+        if reader.offset != input.len() {
+            bail!("trailing bytes in SafeChat message");
+        }
+        Ok(Self { id, plaintext })
+    }
 }
 
 impl SignalEnvelope {
@@ -377,6 +441,19 @@ impl<'a> BundleReader<'a> {
             .input
             .get(self.offset..end)
             .context("truncated Signal bundle")?
+            .to_vec();
+        self.offset = end;
+        Ok(bytes)
+    }
+    fn take(&mut self, length: usize) -> Result<Vec<u8>> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .context("bundle offset overflow")?;
+        let bytes = self
+            .input
+            .get(self.offset..end)
+            .context("truncated SafeChat message")?
             .to_vec();
         self.offset = end;
         Ok(bytes)
@@ -1004,6 +1081,16 @@ impl SqliteSignalState {
         Ok(envelope)
     }
 
+    pub async fn encrypt_message_for(
+        &mut self,
+        bundle: &SignalPreKeyBundle,
+        plaintext: &[u8],
+    ) -> Result<(MessageId, Vec<u8>)> {
+        let message = SafeChatMessage::new(plaintext);
+        let id = message.id;
+        Ok((id, self.encrypt_for(bundle, &message.encode()?).await?))
+    }
+
     pub async fn decrypt_from(
         &mut self,
         sender: &ProtocolAddress,
@@ -1037,6 +1124,14 @@ impl SqliteSignalState {
         self.maintain_key_inventory().await?;
         self.persist_peer(sender).await?;
         Ok(plaintext)
+    }
+
+    pub async fn decrypt_message_from(
+        &mut self,
+        sender: &ProtocolAddress,
+        encoded_envelope: &[u8],
+    ) -> Result<SafeChatMessage> {
+        SafeChatMessage::decode(&self.decrypt_from(sender, encoded_envelope).await?)
     }
 
     async fn is_revoked(&self, peer: &ProtocolAddress) -> Result<bool> {
@@ -1509,6 +1604,16 @@ mod tests {
             ciphertext: vec![],
         };
         assert!(invalid.encode().is_err());
+    }
+
+    #[test]
+    fn message_id_round_trip_is_bound_to_authenticated_payload() {
+        let message = SafeChatMessage::new(b"hello");
+        let decoded = SafeChatMessage::decode(&message.encode().unwrap()).unwrap();
+        assert_eq!(decoded, message);
+        assert_eq!(decoded.plaintext, b"hello");
+        assert_eq!(decoded.id.encode().len(), 32);
+        assert!(SafeChatMessage::decode(b"safechat-message-v1\0garbage").is_err());
     }
 
     #[test]

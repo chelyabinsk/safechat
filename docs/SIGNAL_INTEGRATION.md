@@ -41,6 +41,10 @@ maintenance failures are persisted with repeated-failure diagnostics.
 The former custom handshake, session, ratchet, and envelope commands have been
 removed from the production binary.
 
+SafeChat UI messages add an authenticated random message ID inside the Signal
+plaintext. This provides application-level history deduplication while
+delivery status, retries, and acknowledgement queues remain transport work.
+
 ## Production TODO: key lifecycle and recovery
 
 The key lifecycle now includes persistent maintenance diagnostics, bounded

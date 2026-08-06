@@ -69,6 +69,10 @@ Use `/add-peer` to create another private lobby, `/peers` to list participants,
 and `/use NAME` to switch the active lobby. Messages are sent only to the
 currently selected peer.
 
+Each UI message carries a random authenticated message ID. It is not shown as
+chat content, but it prevents the same logical message from being inserted
+into a lobby history more than once.
+
 Use `/keys` for local prekey inventory and rotation diagnostics. If the device
 identity is compromised or must be replaced, use `/replace-identity`; this
 revokes current sessions, displays a new fingerprint and bundle, and emits a

@@ -3,7 +3,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use dialoguer::{Confirm, Input, Password, Select};
 use directories::ProjectDirs;
-use safechat::signal_adapter::{SignalPreKeyBundle, SqliteSignalState, identity_fingerprint};
+use safechat::signal_adapter::{
+    MessageId, SignalPreKeyBundle, SqliteSignalState, identity_fingerprint,
+};
 use safechat::transport::{BundleTransport, RecoveryTransport, TextTransport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -45,6 +47,8 @@ struct HistoryEntry {
     timestamp: u64,
     sender: String,
     text: String,
+    #[serde(default)]
+    message_id: String,
     #[serde(default)]
     peer: String,
     #[serde(default)]
@@ -709,8 +713,11 @@ fn send_message(
             .into_bytes(),
         _ => return Ok(()),
     };
-    let envelope = futures_executor::block_on(state.encrypt_for(peer, &plaintext))?;
-    send_envelope(paths, password, history, peer, &plaintext, &envelope)?;
+    let (message_id, envelope) =
+        futures_executor::block_on(state.encrypt_message_for(peer, &plaintext))?;
+    send_envelope(
+        paths, password, history, peer, message_id, &plaintext, &envelope,
+    )?;
     Ok(())
 }
 
@@ -722,8 +729,11 @@ fn send_plaintext(
     peer: &SignalPreKeyBundle,
     plaintext: &[u8],
 ) -> Result<()> {
-    let envelope = futures_executor::block_on(state.encrypt_for(peer, plaintext))?;
-    send_envelope(paths, password, history, peer, plaintext, &envelope)
+    let (message_id, envelope) =
+        futures_executor::block_on(state.encrypt_message_for(peer, plaintext))?;
+    send_envelope(
+        paths, password, history, peer, message_id, plaintext, &envelope,
+    )
 }
 
 fn send_envelope(
@@ -731,6 +741,7 @@ fn send_envelope(
     password: &str,
     history: &mut HistoryFile,
     peer: &SignalPreKeyBundle,
+    message_id: MessageId,
     plaintext: &[u8],
     envelope: &[u8],
 ) -> Result<()> {
@@ -739,6 +750,7 @@ fn send_envelope(
         timestamp: now(),
         sender: "you".to_owned(),
         text: String::from_utf8_lossy(plaintext).into_owned(),
+        message_id: message_id.encode(),
         peer: peer.address().to_string(),
         ciphertext: ciphertext.clone(),
     });
@@ -788,12 +800,24 @@ fn receive_envelope(
     peer: &SignalPreKeyBundle,
     envelope: &[u8],
 ) -> Result<()> {
-    let plaintext = futures_executor::block_on(state.decrypt_from(&peer.address(), envelope))?;
-    let text = String::from_utf8(plaintext).context("decrypted message is not UTF-8 text")?;
+    let message =
+        futures_executor::block_on(state.decrypt_message_from(&peer.address(), envelope))?;
+    let message_id = message.id.encode();
+    if history
+        .entries
+        .iter()
+        .any(|entry| entry.message_id == message_id)
+    {
+        println!("Duplicate message ignored.");
+        return Ok(());
+    }
+    let text =
+        String::from_utf8(message.plaintext).context("decrypted message is not UTF-8 text")?;
     history.entries.push(HistoryEntry {
         timestamp: now(),
         sender: peer.name.clone(),
         text: text.clone(),
+        message_id,
         peer: peer.address().to_string(),
         ciphertext: TextTransport.encode(envelope).trim().to_owned(),
     });
@@ -897,6 +921,7 @@ mod tests {
                 timestamp: 1,
                 sender: "alice".to_owned(),
                 text: "private message".to_owned(),
+                message_id: "".to_owned(),
                 peer: "alice".to_owned(),
                 ciphertext: "safechat-text-v1:test".to_owned(),
             }],
