@@ -109,6 +109,14 @@ impl RelayClient {
         self.access_token.as_deref()
     }
 
+    pub fn base_url(&self) -> &str {
+        &self.config.base_url
+    }
+
+    pub fn client_id(&self) -> &str {
+        &self.config.client_id
+    }
+
     pub fn register(&mut self, bundle: &SignalPreKeyBundle) -> Result<RelayRegistration> {
         let challenge: ChallengeResponse = self
             .http

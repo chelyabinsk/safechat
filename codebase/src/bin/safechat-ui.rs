@@ -271,10 +271,20 @@ fn prompt_relay_options(
             .interact()
             .unwrap_or_default()
     });
-    let ca_certificate_pem = ca_certificate
-        .map(fs::read)
-        .transpose()
-        .context("reading relay CA certificate")?;
+    let ca_certificate_pem = match ca_certificate {
+        Some(path) => Some(fs::read(path).context("reading relay CA certificate")?),
+        None => {
+            let path = Input::<String>::new()
+                .with_prompt("Relay CA certificate path (leave empty for a public CA)")
+                .allow_empty(true)
+                .interact_text()?;
+            if path.trim().is_empty() {
+                None
+            } else {
+                Some(fs::read(path.trim()).context("reading relay CA certificate")?)
+            }
+        }
+    };
     Ok(RelayOptions {
         base_url,
         client_id,
@@ -653,22 +663,25 @@ fn chat_loop(
         }
         match command {
             "/help" => print_help(),
-            "/transport" => println!(
-                "Transport: {}",
-                if relay.is_some() {
-                    "Relay"
-                } else {
-                    "Copy/paste"
-                }
-            ),
+            "/transport" => show_transport_info(relay.as_ref()),
             "/transport copy" => {
                 relay = None;
                 println!("Transport changed to Copy/paste.");
             }
             "/transport relay" => {
+                if relay.is_some() {
+                    println!("Already using Relay transport.");
+                    show_transport_info(relay.as_ref());
+                } else {
+                    let options = prompt_relay_options(None, None, None, None)?;
+                    relay = setup_relay(paths, password, state, Some(&options))?;
+                    println!("Transport changed to Relay.");
+                }
+            }
+            "/transport relay edit" => {
                 let options = prompt_relay_options(None, None, None, None)?;
                 relay = setup_relay(paths, password, state, Some(&options))?;
-                println!("Transport changed to Relay.");
+                println!("Relay transport settings updated.");
             }
             "/send" => send_message(
                 paths,
@@ -913,6 +926,7 @@ fn print_help() {
     println!("/r <cipher> decrypt a pasted ciphertext, or poll relay when used alone");
     println!("/transport  show the active transport");
     println!("/transport copy|relay  change transport");
+    println!("/transport relay edit  edit relay settings");
     println!("/send      compose and encrypt a message");
     println!("/receive   paste and decrypt ciphertext");
     println!("/peers     list trusted peers and the active conversation");
@@ -927,6 +941,25 @@ fn print_help() {
     println!("/bundle    export your current public bundle");
     println!("/fingerprint  show your identity fingerprint");
     println!("/quit      close the chat");
+}
+
+fn show_transport_info(relay: Option<&RelayRuntime>) {
+    match relay {
+        Some(runtime) => {
+            println!("Transport: Relay");
+            println!("Relay URL: {}", runtime.client.base_url());
+            println!("Relay client ID: {}", runtime.client.client_id());
+            println!(
+                "Relay session: {}",
+                if runtime.client.is_registered() {
+                    "registered"
+                } else {
+                    "not registered"
+                }
+            );
+        }
+        None => println!("Transport: Copy/paste"),
+    }
 }
 
 fn list_peers(peers: &[SignalPreKeyBundle], active: usize) -> Result<()> {
