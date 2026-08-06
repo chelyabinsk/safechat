@@ -36,27 +36,25 @@ reference stores. The profile password is required to unlock the database.
 Bundle export, UI startup, sending, and receiving maintain a 32-entry
 one-time-prekey target below an 8-entry low-watermark and rotate signed
 prekeys after 30 days. Rotation retains old records for compatibility;
-bounded retirement and operational monitoring remain production work.
+the overlap is bounded to the current and previous signed prekey, and
+maintenance failures are persisted with repeated-failure diagnostics.
 The former custom handshake, session, ratchet, and envelope commands have been
 removed from the production binary.
 
 ## Production TODO: key lifecycle and recovery
 
-The MVP currently has the cryptographic building blocks but not the complete
-operational key lifecycle. Before production deployment, implement and test:
+The key lifecycle now includes persistent maintenance diagnostics, bounded
+signed-prekey overlap, explicit local device revocation, and signed recovery
+records. A replacement record contains the old identity fingerprint, the new
+public bundle/fingerprint, an effective timestamp, and an explicit confirmation
+bit. A peer accepts it only when the old identity is currently trusted, the
+signature verifies, and the user confirms the new fingerprint out of band.
 
-- monitoring and explicit diagnostics when the one-time-prekey inventory is
-  low, signed-prekeys are stale, or rotation cannot be completed;
-- bounded retirement/overlap policy for rotated signed-prekeys and delayed
-  messages;
-- monitoring and explicit diagnostics when prekeys are depleted or stale;
-- identity-key replacement, device revocation, and session invalidation after
-  suspected compromise;
-- an out-of-band recovery flow that publishes the new fingerprint and requires
-  peer re-verification;
-- crash-injection validation of transactional persistence for prekey
-  consumption, ratchet updates, and rotation.
-- a documented migration path for existing plaintext identity databases.
+Remaining production work includes real transport delivery/acknowledgements,
+process-kill/power-loss testing in addition to commit-boundary fault injection,
+encrypted backup and password-change workflows, replay/deduplication policy,
+fuzzing and independent security review, and a migration path for existing
+plaintext identity databases.
 
 Until these are complete, existing sessions remain usable, but new
 asynchronous sessions and compromise recovery require manual operational

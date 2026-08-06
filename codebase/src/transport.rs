@@ -5,6 +5,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub const TEXT_HEADER: &str = "safechat-text-v1:";
 pub const BUNDLE_HEADER: &str = "safechat-bundle-v1:";
+pub const RECOVERY_HEADER: &str = "safechat-recovery-v1:";
 
 /// Reference transport for the protocol envelope.
 ///
@@ -49,9 +50,28 @@ impl BundleTransport {
     }
 }
 
+/// Text representation for signed identity recovery/revocation records.
+pub struct RecoveryTransport;
+
+impl RecoveryTransport {
+    pub fn encode(&self, record: &[u8]) -> String {
+        format!("{RECOVERY_HEADER}{}\n", URL_SAFE_NO_PAD.encode(record))
+    }
+
+    pub fn decode(&self, message: &str) -> Result<Vec<u8>> {
+        let encoded = message
+            .trim()
+            .strip_prefix(RECOVERY_HEADER)
+            .context("invalid safechat recovery header")?;
+        URL_SAFE_NO_PAD
+            .decode(encoded)
+            .context("invalid safechat recovery encoding")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BUNDLE_HEADER, BundleTransport};
+    use super::{BUNDLE_HEADER, BundleTransport, RECOVERY_HEADER, RecoveryTransport};
 
     #[test]
     fn bundle_transport_round_trip() {
@@ -62,5 +82,16 @@ mod tests {
             b"public bundle bytes"
         );
         assert!(BundleTransport.decode("safechat-text-v1:abc").is_err());
+    }
+
+    #[test]
+    fn recovery_transport_round_trip_is_distinct_from_bundles() {
+        let encoded = RecoveryTransport.encode(b"signed recovery record");
+        assert!(encoded.starts_with(RECOVERY_HEADER));
+        assert_eq!(
+            RecoveryTransport.decode(&encoded).unwrap(),
+            b"signed recovery record"
+        );
+        assert!(BundleTransport.decode(&encoded).is_err());
     }
 }

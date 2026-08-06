@@ -69,6 +69,17 @@ Use `/add-peer` to create another private lobby, `/peers` to list participants,
 and `/use NAME` to switch the active lobby. Messages are sent only to the
 currently selected peer.
 
+Use `/keys` for local prekey inventory and rotation diagnostics. If the device
+identity is compromised or must be replaced, use `/replace-identity`; this
+revokes current sessions, displays a new fingerprint and bundle, and emits a
+signed recovery record for existing peers. Existing peers paste that record
+with `/accept-recovery` and confirm the new fingerprint through their separate
+trusted channel. `/revoke-device` locally revokes the active peer device and
+requires fresh verification before it can be used again.
+
+Use `/keys` to see persistent maintenance-failure counts and the last error;
+repeated replenishment or rotation failures are shown as an alert.
+
 For quick manual chat, use the shortcuts directly at the prompt:
 
 ```text

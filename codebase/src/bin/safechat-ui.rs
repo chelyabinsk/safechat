@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use dialoguer::{Confirm, Input, Password, Select};
 use directories::ProjectDirs;
 use safechat::signal_adapter::{SignalPreKeyBundle, SqliteSignalState, identity_fingerprint};
-use safechat::transport::{BundleTransport, TextTransport};
+use safechat::transport::{BundleTransport, RecoveryTransport, TextTransport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -148,6 +148,19 @@ impl ProfilePaths {
     fn lobby_history(&self, peer: &SignalPreKeyBundle) -> PathBuf {
         self.lobby_histories
             .join(format!("{}.age", peer_file_component(peer)))
+    }
+
+    fn clear_peer_bundles(&self) -> Result<()> {
+        for entry in fs::read_dir(&self.peers)? {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "bundle")
+            {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -373,11 +386,24 @@ fn chat_loop(
 ) -> Result<()> {
     let mut current = 0;
     println!();
-    println!("Conversation with {}", peers[current].address());
+    if let Some(peer) = peers.first() {
+        println!("Conversation with {}", peer.address());
+    } else {
+        println!("No active private lobby. Use /add-peer to establish one.");
+    }
     println!("Type /help for commands.");
     loop {
         let command = Input::<String>::new().with_prompt("> ").interact_text()?;
         let command = command.trim();
+        if peers.is_empty()
+            && (command.starts_with("/s ")
+                || command.starts_with("/r ")
+                || command.starts_with("/use ")
+                || matches!(command, "/send" | "/receive" | "/clean" | "/cipher"))
+        {
+            println!("No active private lobby. Use /add-peer first.");
+            continue;
+        }
         if let Some(message) = command.strip_prefix("/s ") {
             if message.trim().is_empty() {
                 println!("Usage: /s <plain text>");
@@ -449,6 +475,153 @@ fn chat_loop(
                 }
                 println!("Active conversation: {}", peers[current].address());
             }
+            "/keys" => match futures_executor::block_on(state.maintain_key_inventory()) {
+                Ok(report) => {
+                    let status = state.key_maintenance_status()?;
+                    println!(
+                        "Key inventory: {} one-time prekeys, {} signed prekeys{}{}",
+                        report.one_time_prekeys,
+                        report.signed_prekeys,
+                        if report.replenished {
+                            "; replenished"
+                        } else {
+                            ""
+                        },
+                        if report.rotated {
+                            "; signed prekey rotated"
+                        } else {
+                            ""
+                        },
+                    );
+                    println!(
+                        "Maintenance failures: {} total, {} consecutive",
+                        status.total_failures, status.consecutive_failures
+                    );
+                    if let Some(error) = status.last_error {
+                        println!("Last maintenance error: {error}");
+                    }
+                }
+                Err(error) => {
+                    let status = state.key_maintenance_status()?;
+                    println!("Key maintenance failed: {error:#}");
+                    println!(
+                        "ALERT: {} consecutive maintenance failures ({} total)",
+                        status.consecutive_failures, status.total_failures
+                    );
+                }
+            },
+            "/replace-identity" => {
+                if !Confirm::new()
+                    .with_prompt("Replace this identity and revoke all current private lobbies?")
+                    .default(false)
+                    .interact()?
+                {
+                    continue;
+                }
+                let (bundle, recovery) =
+                    futures_executor::block_on(state.replace_identity_with_recovery())?;
+                paths.clear_peer_bundles()?;
+                peers.clear();
+                histories.clear();
+                println!("Identity replaced. All previous sessions are revoked.");
+                println!(
+                    "New fingerprint: {}",
+                    identity_fingerprint(&bundle.identity_key()?)
+                );
+                println!("Copy and send this new public bundle:");
+                println!("{}", BundleTransport.encode(&bundle.encode()?));
+                println!("Signed recovery record (send to existing peers):");
+                println!("{}", RecoveryTransport.encode(&recovery.encode()?));
+                println!("Use /add-peer to re-establish a verified private lobby.");
+            }
+            "/accept-recovery" => {
+                let text = Input::<String>::new()
+                    .with_prompt("Paste the signed recovery record")
+                    .interact_text()?;
+                let bytes = RecoveryTransport.decode(&text)?;
+                let record = safechat::signal_adapter::IdentityRecoveryRecord::decode(&bytes)?;
+                println!("Old fingerprint: {}", record.old_fingerprint());
+                println!("New fingerprint: {}", record.new_fingerprint()?);
+                let confirmed = Confirm::new()
+                    .with_prompt(
+                        "Have you verified the new fingerprint through a separate trusted channel?",
+                    )
+                    .default(false)
+                    .interact()?;
+                let bundle = futures_executor::block_on(state.accept_recovery(&record, confirmed))?;
+                let history = if let Some(index) = peers
+                    .iter()
+                    .position(|peer| peer.address() == bundle.address())
+                {
+                    histories[index].clone()
+                } else {
+                    peers.push(bundle.clone());
+                    histories.push(HistoryFile {
+                        version: PROFILE_VERSION,
+                        entries: Vec::new(),
+                    });
+                    histories.last().cloned().unwrap()
+                };
+                let index = peers
+                    .iter()
+                    .position(|peer| peer.address() == bundle.address())
+                    .unwrap();
+                peers[index] = bundle.clone();
+                histories[index] = history;
+                write_bundle(
+                    &paths
+                        .peers
+                        .join(format!("{}.bundle", peer_file_component(&bundle))),
+                    &bundle,
+                )?;
+                println!(
+                    "Recovery accepted. The old device identity is revoked and the new lobby is ready."
+                );
+            }
+            "/revoke-device" => {
+                if peers.is_empty() {
+                    println!("No active private lobby to revoke.");
+                    continue;
+                }
+                let peer = peers[current].clone();
+                if Confirm::new()
+                    .with_prompt(format!(
+                        "Revoke device {} and require fresh fingerprint verification?",
+                        peer.address()
+                    ))
+                    .default(false)
+                    .interact()?
+                {
+                    futures_executor::block_on(state.revoke_device(&peer.address()))?;
+                    paths
+                        .peers
+                        .join(format!("{}.bundle", peer_file_component(&peer)))
+                        .try_exists()
+                        .ok()
+                        .filter(|exists| *exists)
+                        .map(|_| {
+                            fs::remove_file(
+                                paths
+                                    .peers
+                                    .join(format!("{}.bundle", peer_file_component(&peer))),
+                            )
+                        })
+                        .transpose()?;
+                    peers.remove(current);
+                    histories.remove(current);
+                    if peers.is_empty() {
+                        println!(
+                            "Device revoked. Use /add-peer to establish a fresh verified lobby."
+                        );
+                        current = 0;
+                    } else {
+                        current = current.min(peers.len() - 1);
+                        println!(
+                            "Device revoked. Fresh fingerprint verification is required before reuse."
+                        );
+                    }
+                }
+            }
             command if command.starts_with("/use ") => {
                 let selector = command.trim_start_matches("/use ").trim();
                 if let Some(index) = peers.iter().position(|peer| {
@@ -491,6 +664,10 @@ fn print_help() {
     println!("/peers     list trusted peers and the active conversation");
     println!("/use NAME  switch the active conversation");
     println!("/add-peer  trust another participant's bundle");
+    println!("/keys      show key inventory and rotation diagnostics");
+    println!("/replace-identity  revoke sessions and create a new identity");
+    println!("/accept-recovery  accept a signed replacement notice after fingerprint verification");
+    println!("/revoke-device  revoke the active peer device locally");
     println!("/clean     show only the readable chat");
     println!("/cipher    show the copyable encrypted chat");
     println!("/bundle    export your current public bundle");

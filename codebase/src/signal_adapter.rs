@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use signal_protocol::{
     CiphertextMessage, CiphertextMessageType, DeviceId, GenericSignedPreKey, IdentityKey,
-    IdentityKeyPair, IdentityKeyStore, InMemSignalProtocolStore, KeyPair, KyberPreKeyRecord,
-    KyberPreKeyStore, PreKeyBundle, PreKeyBundleContent, PreKeyId, PreKeyRecord,
+    IdentityKeyPair, IdentityKeyStore, InMemSignalProtocolStore, InMemSignedPreKeyStore, KeyPair,
+    KyberPreKeyRecord, KyberPreKeyStore, PreKeyBundle, PreKeyBundleContent, PreKeyId, PreKeyRecord,
     PreKeySignalMessage, PreKeyStore, ProtocolAddress, SessionStore, SignalMessage, SignedPreKeyId,
     SignedPreKeyRecord, SignedPreKeyStore, Timestamp, kem, message_decrypt, message_encrypt,
     process_prekey_bundle,
@@ -20,17 +20,116 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+#[cfg(test)]
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+
 const ENVELOPE_MAGIC: &[u8] = b"safechat-signal-envelope-v1\0";
 const ENVELOPE_HEADER_LEN: usize = ENVELOPE_MAGIC.len() + 1 + 4;
 const MAX_CIPHERTEXT_LEN: usize = 16 * 1024 * 1024;
 const BUNDLE_MAGIC: &[u8] = b"safechat-signal-bundle-v1\0";
+const RECOVERY_MAGIC: &[u8] = b"safechat-signal-recovery-v1\0";
 const MAX_BUNDLE_FIELD_LEN: usize = 16 * 1024;
 const PREKEY_LOW_WATERMARK: usize = 8;
 const PREKEY_TARGET: usize = 32;
 const SIGNED_PREKEY_ROTATION_SECS: u64 = 30 * 24 * 60 * 60;
+const SIGNED_PREKEY_OVERLAP: usize = 2;
+
+#[cfg(test)]
+static FAIL_BEFORE_PERSIST_COMMIT: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAILPOINT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Exact upstream revision used by this workspace.
 pub const LIBSIGNAL_REVISION: &str = "b5121d07c72f9e631f178d907ca892587f64f9e2";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyMaintenanceReport {
+    pub one_time_prekeys: usize,
+    pub signed_prekeys: usize,
+    pub replenished: bool,
+    pub rotated: bool,
+    pub consecutive_failures: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyMaintenanceStatus {
+    pub consecutive_failures: u32,
+    pub total_failures: u64,
+    pub last_error: Option<String>,
+    pub last_failed_at: Option<u64>,
+}
+
+/// A signed, auditable statement that an identity was replaced.
+/// The old identity signs the replacement bundle, so a recipient can accept
+/// it without silently trusting an arbitrary new key.
+#[derive(Clone)]
+pub struct IdentityRecoveryRecord {
+    pub old_identity: IdentityKey,
+    pub new_bundle: SignalPreKeyBundle,
+    pub effective_at: u64,
+    pub confirmation: bool,
+    pub signature: Vec<u8>,
+}
+
+impl IdentityRecoveryRecord {
+    fn payload(&self) -> Result<Vec<u8>> {
+        let bundle = self.new_bundle.encode()?;
+        let mut payload = RECOVERY_MAGIC.to_vec();
+        put_bytes(&mut payload, &self.old_identity.serialize())?;
+        put_bytes(&mut payload, &bundle)?;
+        payload.extend(self.effective_at.to_be_bytes());
+        payload.push(u8::from(self.confirmation));
+        Ok(payload)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let mut output = self.payload()?;
+        put_bytes(&mut output, &self.signature)?;
+        Ok(output)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self> {
+        let mut reader = BundleReader { input, offset: 0 };
+        reader.expect(RECOVERY_MAGIC)?;
+        let old_identity = IdentityKey::decode(&reader.bytes()?)?;
+        let new_bundle = SignalPreKeyBundle::decode(&reader.bytes()?)?;
+        let effective_at = reader.u64()?;
+        let confirmation = match reader.byte()? {
+            0 => false,
+            1 => true,
+            _ => bail!("invalid recovery confirmation"),
+        };
+        let signature = reader.bytes()?;
+        if reader.offset != input.len() {
+            bail!("trailing bytes in recovery record");
+        }
+        Ok(Self {
+            old_identity,
+            new_bundle,
+            effective_at,
+            confirmation,
+            signature,
+        })
+    }
+
+    pub fn old_fingerprint(&self) -> String {
+        identity_fingerprint(&self.old_identity)
+    }
+
+    pub fn new_fingerprint(&self) -> Result<String> {
+        Ok(identity_fingerprint(&self.new_bundle.identity_key()?))
+    }
+
+    pub fn verify(&self) -> Result<bool> {
+        Ok(self
+            .old_identity
+            .public_key()
+            .verify_signature(&self.payload()?, &self.signature))
+    }
+}
 
 /// Carrier-neutral serialized Signal ciphertext.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -253,6 +352,18 @@ impl<'a> BundleReader<'a> {
         self.offset = end;
         Ok(u32::from_be_bytes(bytes.try_into()?))
     }
+    fn u64(&mut self) -> Result<u64> {
+        let end = self
+            .offset
+            .checked_add(8)
+            .context("bundle offset overflow")?;
+        let bytes = self
+            .input
+            .get(self.offset..end)
+            .context("truncated Signal bundle")?;
+        self.offset = end;
+        Ok(u64::from_be_bytes(bytes.try_into()?))
+    }
     fn bytes(&mut self) -> Result<Vec<u8>> {
         let length = self.u32()? as usize;
         if length > MAX_BUNDLE_FIELD_LEN {
@@ -344,9 +455,32 @@ impl SqliteSignalState {
                  id INTEGER PRIMARY KEY CHECK (id = 1),
                  signed_prekey_created_at INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS signal_maintenance_failures (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                 total_failures INTEGER NOT NULL DEFAULT 0,
+                 last_error TEXT,
+                 last_failed_at INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS signal_recovery_records (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 old_fingerprint TEXT NOT NULL,
+                 new_fingerprint TEXT NOT NULL,
+                 effective_at INTEGER NOT NULL,
+                 record BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS signal_revocations (
+                 peer_address TEXT PRIMARY KEY,
+                 old_fingerprint TEXT NOT NULL,
+                 new_fingerprint TEXT,
+                 effective_at INTEGER NOT NULL,
+                 reason TEXT NOT NULL
+             );
              INSERT INTO signal_meta(id, schema_version) VALUES (1, 1)
                  ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version;
              INSERT INTO signal_key_lifecycle(id, signed_prekey_created_at) VALUES (1, 0)
+                 ON CONFLICT(id) DO NOTHING;
+             INSERT INTO signal_maintenance_failures(id) VALUES (1)
                  ON CONFLICT(id) DO NOTHING;",
         )?;
 
@@ -464,6 +598,10 @@ impl SqliteSignalState {
             .identity_store
             .save_identity(peer, identity)
             .await?;
+        self.db.execute(
+            "DELETE FROM signal_revocations WHERE peer_address = ?1",
+            params![peer.to_string()],
+        )?;
         self.persist_peer(peer).await
     }
 
@@ -482,20 +620,250 @@ impl SqliteSignalState {
 
     /// Maintain local prekeys without requiring the caller to manage bundles.
     /// This is safe to call before sending and after receiving messages.
-    pub async fn maintain_key_inventory(&mut self) -> Result<()> {
+    pub async fn maintain_key_inventory(&mut self) -> Result<KeyMaintenanceReport> {
+        match self.maintain_key_inventory_inner().await {
+            Ok(mut report) => {
+                self.db.execute(
+                    "UPDATE signal_maintenance_failures SET consecutive_failures = 0 WHERE id = 1",
+                    [],
+                )?;
+                report.consecutive_failures = 0;
+                Ok(report)
+            }
+            Err(error) => {
+                self.record_maintenance_failure(&format!("{error:#}"))?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn maintain_key_inventory_inner(&mut self) -> Result<KeyMaintenanceReport> {
         let mut rng = signal_rand::rngs::OsRng.unwrap_err();
-        let (changed, rotated_at) = self.ensure_key_inventory(&mut rng).await?;
-        if !changed {
+        let before_prekeys = self.store.all_pre_key_ids().count();
+        let before_signed = self.store.all_signed_pre_key_ids().count();
+        let (changed, rotated_at) = self
+            .ensure_key_inventory(&mut rng)
+            .await
+            .context("maintaining Signal key inventory")?;
+        let mut changed = changed;
+        if self.store.all_signed_pre_key_ids().count() > SIGNED_PREKEY_OVERLAP {
+            self.retain_signed_prekey_overlap().await?;
+            changed = true;
+        }
+        if changed {
+            let local = self.local_address.clone();
+            self.persist_peer(&local)
+                .await
+                .context("persisting Signal key lifecycle state")?;
+            if let Some(created_at) = rotated_at {
+                self.db.execute(
+                    "UPDATE signal_key_lifecycle SET signed_prekey_created_at = ?1 WHERE id = 1",
+                    params![created_at],
+                )?;
+            }
+        }
+        Ok(KeyMaintenanceReport {
+            one_time_prekeys: self.store.all_pre_key_ids().count(),
+            signed_prekeys: self.store.all_signed_pre_key_ids().count(),
+            replenished: self.store.all_pre_key_ids().count() > before_prekeys,
+            rotated: rotated_at.is_some()
+                || self.store.all_signed_pre_key_ids().count() > before_signed,
+            consecutive_failures: 0,
+        })
+    }
+
+    fn record_maintenance_failure(&mut self, error: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE signal_maintenance_failures
+             SET consecutive_failures = consecutive_failures + 1,
+                 total_failures = total_failures + 1,
+                 last_error = ?1, last_failed_at = ?2 WHERE id = 1",
+            params![error, unix_seconds()?],
+        )?;
+        Ok(())
+    }
+
+    pub fn key_maintenance_status(&self) -> Result<KeyMaintenanceStatus> {
+        self.db
+            .query_row(
+                "SELECT consecutive_failures, total_failures, last_error, last_failed_at
+             FROM signal_maintenance_failures WHERE id = 1",
+                [],
+                |row| {
+                    Ok(KeyMaintenanceStatus {
+                        consecutive_failures: row.get::<_, u32>(0)?,
+                        total_failures: row.get::<_, u64>(1)?,
+                        last_error: row.get(2)?,
+                        last_failed_at: row
+                            .get::<_, Option<i64>>(3)?
+                            .map(|value| value.max(0) as u64),
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// Replace the local identity after compromise or device recovery.
+    /// Existing sessions and trusted peer records are intentionally revoked.
+    /// Callers must distribute the returned bundle and re-verify its new
+    /// fingerprint through an independent trusted channel.
+    pub async fn replace_identity(&mut self) -> Result<SignalPreKeyBundle> {
+        Ok(self.replace_identity_with_recovery().await?.0)
+    }
+
+    pub async fn replace_identity_with_recovery(
+        &mut self,
+    ) -> Result<(SignalPreKeyBundle, IdentityRecoveryRecord)> {
+        let old_identity_pair = self.store.identity_store.get_identity_key_pair().await?;
+        let old_identity = *old_identity_pair.identity_key();
+        let mut rng = signal_rand::rngs::OsRng.unwrap_err();
+        let identity_pair = IdentityKeyPair::generate(&mut rng);
+        let registration_id = rng.random::<u32>() & 0x3fff;
+        let replacement_store = InMemSignalProtocolStore::new(identity_pair, registration_id)?;
+
+        let tx = self.db.transaction()?;
+        tx.execute(
+            "UPDATE signal_identity SET identity_pair = ?1, registration_id = ?2 WHERE id = 1",
+            params![identity_pair.serialize().as_ref(), registration_id],
+        )?;
+        tx.execute("DELETE FROM signal_sessions", [])?;
+        tx.execute("DELETE FROM signal_trusted_identities", [])?;
+        tx.execute("DELETE FROM signal_prekeys", [])?;
+        tx.execute("DELETE FROM signal_signed_prekeys", [])?;
+        tx.execute("DELETE FROM signal_kyber_prekeys", [])?;
+        tx.execute(
+            "UPDATE signal_key_lifecycle SET signed_prekey_created_at = 0 WHERE id = 1",
+            [],
+        )?;
+        tx.commit()?;
+
+        self.store = replacement_store;
+        let bundle = self.export_bundle().await?;
+        let unsigned = IdentityRecoveryRecord {
+            old_identity,
+            new_bundle: bundle.clone(),
+            effective_at: unix_seconds()?,
+            confirmation: true,
+            signature: Vec::new(),
+        };
+        let signature = old_identity_pair
+            .private_key()
+            .calculate_signature(&unsigned.payload()?, &mut rng)?
+            .to_vec();
+        let record = IdentityRecoveryRecord {
+            signature,
+            ..unsigned
+        };
+        self.db.execute(
+            "INSERT INTO signal_recovery_records(old_fingerprint, new_fingerprint, effective_at, record)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![record.old_fingerprint(), record.new_fingerprint()?, record.effective_at, record.encode()?],
+        )?;
+        Ok((bundle, record))
+    }
+
+    pub async fn accept_recovery(
+        &mut self,
+        record: &IdentityRecoveryRecord,
+        confirmed: bool,
+    ) -> Result<SignalPreKeyBundle> {
+        if !confirmed || !record.confirmation {
+            bail!("recovery requires explicit new-fingerprint confirmation");
+        }
+        if !record.verify()? {
+            bail!("recovery record signature is invalid");
+        }
+        let peer = record.new_bundle.address();
+        if self.trusted_identity(&peer).await? != Some(record.old_identity) {
+            bail!("recovery record is not signed by the currently trusted peer identity");
+        }
+        let new_identity = record.new_bundle.identity_key()?;
+        self.store
+            .identity_store
+            .save_identity(&peer, &new_identity)
+            .await?;
+        self.db.execute(
+            "DELETE FROM signal_sessions WHERE peer_address = ?1",
+            params![peer.to_string()],
+        )?;
+        self.db.execute(
+            "INSERT INTO signal_revocations(peer_address, old_fingerprint, new_fingerprint, effective_at, reason)
+             VALUES (?1, ?2, ?3, ?4, 'identity replacement')
+             ON CONFLICT(peer_address) DO UPDATE SET old_fingerprint=excluded.old_fingerprint,
+             new_fingerprint=excluded.new_fingerprint, effective_at=excluded.effective_at,
+             reason=excluded.reason",
+            params![peer.to_string(), record.old_fingerprint(), record.new_fingerprint()?, record.effective_at],
+        )?;
+        self.db.execute(
+            "INSERT INTO signal_recovery_records(old_fingerprint, new_fingerprint, effective_at, record)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![record.old_fingerprint(), record.new_fingerprint()?, record.effective_at, record.encode()?],
+        )?;
+        self.persist_peer(&peer).await?;
+        self.reset_runtime_store().await?;
+        Ok(record.new_bundle.clone())
+    }
+
+    pub async fn revoke_device(&mut self, peer: &ProtocolAddress) -> Result<()> {
+        let old_fingerprint = self
+            .trusted_identity(peer)
+            .await?
+            .map(|identity| identity_fingerprint(&identity))
+            .unwrap_or_else(|| "unknown".to_owned());
+        self.db.execute(
+            "DELETE FROM signal_sessions WHERE peer_address = ?1",
+            params![peer.to_string()],
+        )?;
+        self.db.execute(
+            "DELETE FROM signal_trusted_identities WHERE peer_address = ?1",
+            params![peer.to_string()],
+        )?;
+        self.db.execute(
+            "INSERT INTO signal_revocations(peer_address, old_fingerprint, new_fingerprint, effective_at, reason)
+             VALUES (?1, ?2, NULL, ?3, 'explicit device revocation')
+             ON CONFLICT(peer_address) DO UPDATE SET old_fingerprint=excluded.old_fingerprint,
+             new_fingerprint=NULL, effective_at=excluded.effective_at, reason=excluded.reason",
+            params![peer.to_string(), old_fingerprint, unix_seconds()?],
+        )?;
+        self.reset_runtime_store().await
+    }
+
+    async fn reset_runtime_store(&mut self) -> Result<()> {
+        let identity = self.store.identity_store.get_identity_key_pair().await?;
+        let registration_id = self
+            .store
+            .identity_store
+            .get_local_registration_id()
+            .await?;
+        self.store = InMemSignalProtocolStore::new(identity, registration_id)?;
+        self.load_records().await
+    }
+
+    async fn retain_signed_prekey_overlap(&mut self) -> Result<()> {
+        let mut ids = self
+            .store
+            .all_signed_pre_key_ids()
+            .copied()
+            .collect::<Vec<_>>();
+        ids.sort_by_key(|id| u32::from(*id));
+        if ids.len() <= SIGNED_PREKEY_OVERLAP {
             return Ok(());
         }
-        let local = self.local_address.clone();
-        self.persist_peer(&local).await?;
-        if let Some(created_at) = rotated_at {
-            self.db.execute(
-                "UPDATE signal_key_lifecycle SET signed_prekey_created_at = ?1 WHERE id = 1",
-                params![created_at],
-            )?;
+        let retained = ids
+            .into_iter()
+            .rev()
+            .take(SIGNED_PREKEY_OVERLAP)
+            .collect::<Vec<_>>();
+        let mut store = InMemSignedPreKeyStore::new();
+        for id in retained {
+            let record = self
+                .store
+                .signed_pre_key_store
+                .get_signed_pre_key(id)
+                .await?;
+            store.save_signed_pre_key(id, &record).await?;
         }
+        self.store.signed_pre_key_store = store;
         Ok(())
     }
 
@@ -594,6 +962,9 @@ impl SqliteSignalState {
         }
         self.maintain_key_inventory().await?;
         self.load_peer(&peer).await?;
+        if self.is_revoked(&peer).await? {
+            bail!("peer device is revoked; verify a replacement bundle first");
+        }
         let expected = bundle.identity_key()?;
         if self.trusted_identity(&peer).await? != Some(expected) {
             bail!("peer identity is not trusted; verify and run signal trust first");
@@ -640,6 +1011,11 @@ impl SqliteSignalState {
     ) -> Result<Vec<u8>> {
         let local = self.local_address.clone();
         self.load_peer(sender).await?;
+        if self.is_revoked(sender).await? {
+            bail!(
+                "sender device is revoked; accept a signed recovery or verify a new bundle first"
+            );
+        }
         let trusted = self.trusted_identity(sender).await?;
         if trusted.is_none() {
             bail!("sender identity is not trusted; verify it before decrypting");
@@ -661,6 +1037,28 @@ impl SqliteSignalState {
         self.maintain_key_inventory().await?;
         self.persist_peer(sender).await?;
         Ok(plaintext)
+    }
+
+    async fn is_revoked(&self, peer: &ProtocolAddress) -> Result<bool> {
+        let revoked = self
+            .db
+            .query_row(
+                "SELECT new_fingerprint FROM signal_revocations WHERE peer_address = ?1",
+                params![peer.to_string()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        match revoked {
+            None => Ok(false),
+            Some(None) => Ok(true),
+            Some(Some(expected)) => Ok(self
+                .store
+                .identity_store
+                .get_identity(peer)
+                .await?
+                .map(|identity| identity_fingerprint(&identity) != expected)
+                .unwrap_or(true)),
+        }
     }
 
     async fn load_records(&mut self) -> Result<()> {
@@ -833,6 +1231,7 @@ impl SqliteSignalState {
         // One-time prekeys removed by libsignal must not remain available after
         // a restart. The active in-memory store is the authoritative snapshot.
         tx.execute("DELETE FROM signal_prekeys", [])?;
+        tx.execute("DELETE FROM signal_signed_prekeys", [])?;
         for (id, record) in prekeys {
             tx.execute("INSERT INTO signal_prekeys(id, record) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET record = excluded.record", params![id, record])?;
         }
@@ -841,6 +1240,10 @@ impl SqliteSignalState {
         }
         for (id, record) in kyber_prekeys {
             tx.execute("INSERT INTO signal_kyber_prekeys(id, record) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET record = excluded.record", params![id, record])?;
+        }
+        #[cfg(test)]
+        if FAIL_BEFORE_PERSIST_COMMIT.swap(false, Ordering::SeqCst) {
+            bail!("injected persistence failure before commit");
         }
         tx.commit()?;
         Ok(())
@@ -1070,6 +1473,13 @@ pub fn identity_fingerprint(identity: &IdentityKey) -> String {
         .collect::<String>()
 }
 
+fn unix_seconds() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        .as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1145,5 +1555,250 @@ mod tests {
             assert!(state.store.all_pre_key_ids().count() >= PREKEY_TARGET);
         });
         std::fs::remove_file(path).unwrap();
+    }
+
+    fn test_path(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "safechat-{prefix}-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    async fn paired_states(
+        prefix: &str,
+    ) -> (
+        SqliteSignalState,
+        SqliteSignalState,
+        SignalPreKeyBundle,
+        SignalPreKeyBundle,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let alice_path = test_path(&format!("{prefix}-alice"));
+        let bob_path = test_path(&format!("{prefix}-bob"));
+        let mut alice = SqliteSignalState::initialize(&alice_path, "alice", 1, "password")
+            .await
+            .unwrap();
+        let mut bob = SqliteSignalState::initialize(&bob_path, "bob", 1, "password")
+            .await
+            .unwrap();
+        let alice_bundle = alice.export_bundle().await.unwrap();
+        let bob_bundle = bob.export_bundle().await.unwrap();
+        alice.trust_bundle(&bob_bundle).await.unwrap();
+        bob.trust_bundle(&alice_bundle).await.unwrap();
+        (alice, bob, alice_bundle, bob_bundle, alice_path, bob_path)
+    }
+
+    fn cleanup_paths(paths: &[&std::path::Path]) {
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn ratchet_update_can_be_retried_after_persist_failure() {
+        let _lock = FAILPOINT_LOCK.lock().unwrap();
+        futures_executor::block_on(async {
+            let (mut alice, mut bob, alice_bundle, bob_bundle, alice_path, bob_path) =
+                paired_states("ratchet-recovery").await;
+            let first = alice.encrypt_for(&bob_bundle, b"first").await.unwrap();
+            assert_eq!(
+                bob.decrypt_from(&alice_bundle.address(), &first)
+                    .await
+                    .unwrap(),
+                b"first"
+            );
+
+            FAIL_BEFORE_PERSIST_COMMIT.store(true, Ordering::SeqCst);
+            assert!(alice.encrypt_for(&bob_bundle, b"retry me").await.is_err());
+            drop(alice);
+            let mut alice = SqliteSignalState::open(&alice_path, "password")
+                .await
+                .unwrap();
+            let retry = alice.encrypt_for(&bob_bundle, b"retry me").await.unwrap();
+            assert_eq!(
+                bob.decrypt_from(&alice_bundle.address(), &retry)
+                    .await
+                    .unwrap(),
+                b"retry me"
+            );
+            drop(bob);
+            cleanup_paths(&[&alice_path, &bob_path]);
+        });
+    }
+
+    #[test]
+    fn prekey_consumption_can_be_retried_after_persist_failure() {
+        let _lock = FAILPOINT_LOCK.lock().unwrap();
+        futures_executor::block_on(async {
+            let (mut alice, mut bob, alice_bundle, bob_bundle, alice_path, bob_path) =
+                paired_states("prekey-recovery").await;
+            let first = alice
+                .encrypt_for(&bob_bundle, b"prekey retry")
+                .await
+                .unwrap();
+            FAIL_BEFORE_PERSIST_COMMIT.store(true, Ordering::SeqCst);
+            assert!(
+                bob.decrypt_from(&alice_bundle.address(), &first)
+                    .await
+                    .is_err()
+            );
+            drop(bob);
+            let mut bob = SqliteSignalState::open(&bob_path, "password")
+                .await
+                .unwrap();
+            assert_eq!(
+                bob.decrypt_from(&alice_bundle.address(), &first)
+                    .await
+                    .unwrap(),
+                b"prekey retry"
+            );
+            drop(alice);
+            cleanup_paths(&[&alice_path, &bob_path]);
+        });
+    }
+
+    #[test]
+    fn signed_prekey_rotation_can_be_retried_after_persist_failure() {
+        let _lock = FAILPOINT_LOCK.lock().unwrap();
+        futures_executor::block_on(async {
+            let path = test_path("rotation-recovery");
+            let mut state = SqliteSignalState::initialize(&path, "alice", 1, "password")
+                .await
+                .unwrap();
+            state.export_bundle().await.unwrap();
+            let initial_count = state.store.all_signed_pre_key_ids().count();
+            state
+                .db
+                .execute(
+                    "UPDATE signal_key_lifecycle SET signed_prekey_created_at = 0 WHERE id = 1",
+                    [],
+                )
+                .unwrap();
+            FAIL_BEFORE_PERSIST_COMMIT.store(true, Ordering::SeqCst);
+            assert!(state.export_bundle().await.is_err());
+            drop(state);
+            let mut reopened = SqliteSignalState::open(&path, "password").await.unwrap();
+            assert_eq!(
+                reopened.store.all_signed_pre_key_ids().count(),
+                initial_count
+            );
+            reopened.export_bundle().await.unwrap();
+            assert!(reopened.store.all_signed_pre_key_ids().count() <= SIGNED_PREKEY_OVERLAP);
+            drop(reopened);
+            cleanup_paths(&[&path]);
+        });
+    }
+
+    #[test]
+    fn identity_replacement_changes_fingerprint_and_rebuilds_keys() {
+        futures_executor::block_on(async {
+            let path = test_path("identity-replacement");
+            let mut state = SqliteSignalState::initialize(&path, "alice", 1, "password")
+                .await
+                .unwrap();
+            let old_fingerprint = state.local_identity_fingerprint().await.unwrap();
+            let new_bundle = state.replace_identity().await.unwrap();
+            let new_fingerprint = identity_fingerprint(&new_bundle.identity_key().unwrap());
+            assert_ne!(old_fingerprint, new_fingerprint);
+            assert_eq!(
+                state.local_identity_fingerprint().await.unwrap(),
+                new_fingerprint
+            );
+            assert!(state.store.all_pre_key_ids().count() >= PREKEY_TARGET);
+            drop(state);
+            cleanup_paths(&[&path]);
+        });
+    }
+
+    #[test]
+    fn signed_recovery_replaces_a_trusted_peer_and_revokes_old_identity() {
+        futures_executor::block_on(async {
+            let (alice, mut bob, alice_bundle, bob_bundle, alice_path, bob_path) =
+                paired_states("signed-recovery").await;
+            let old_fingerprint = identity_fingerprint(&alice_bundle.identity_key().unwrap());
+            drop(alice);
+            let mut replacement = SqliteSignalState::open(&alice_path, "password")
+                .await
+                .unwrap();
+            let (new_bundle, record) = replacement.replace_identity_with_recovery().await.unwrap();
+            assert_eq!(record.old_fingerprint(), old_fingerprint);
+            assert!(record.verify().unwrap());
+            assert_ne!(record.new_fingerprint().unwrap(), old_fingerprint);
+            let accepted = bob.accept_recovery(&record, true).await.unwrap();
+            assert_eq!(
+                accepted.identity_key().unwrap(),
+                new_bundle.identity_key().unwrap()
+            );
+            assert!(
+                bob.decrypt_from(&alice_bundle.address(), &[])
+                    .await
+                    .is_err()
+            );
+            drop(replacement);
+            drop(bob);
+            cleanup_paths(&[&alice_path, &bob_path]);
+            let _ = bob_bundle;
+        });
+    }
+
+    #[test]
+    fn explicit_device_revocation_is_persistent_and_reports_maintenance_failures() {
+        futures_executor::block_on(async {
+            let (mut alice, bob, alice_bundle, bob_bundle, alice_path, bob_path) =
+                paired_states("device-revocation").await;
+            alice.revoke_device(&bob_bundle.address()).await.unwrap();
+            assert!(alice.encrypt_for(&bob_bundle, b"blocked").await.is_err());
+            let reopened = SqliteSignalState::open(&alice_path, "password")
+                .await
+                .unwrap();
+            assert!(
+                reopened
+                    .key_maintenance_status()
+                    .unwrap()
+                    .last_error
+                    .is_none()
+            );
+            drop(reopened);
+            drop(alice);
+            drop(bob);
+            cleanup_paths(&[&alice_path, &bob_path]);
+            let _ = alice_bundle;
+        });
+    }
+
+    #[test]
+    fn maintenance_failures_are_counted_and_cleared_after_recovery() {
+        let _lock = FAILPOINT_LOCK.lock().unwrap();
+        futures_executor::block_on(async {
+            let path = test_path("maintenance-failures");
+            let mut state = SqliteSignalState::initialize(&path, "alice", 1, "password")
+                .await
+                .unwrap();
+            state.export_bundle().await.unwrap();
+            state
+                .db
+                .execute(
+                    "UPDATE signal_key_lifecycle SET signed_prekey_created_at = 0 WHERE id = 1",
+                    [],
+                )
+                .unwrap();
+            FAIL_BEFORE_PERSIST_COMMIT.store(true, Ordering::SeqCst);
+            assert!(state.export_bundle().await.is_err());
+            let status = state.key_maintenance_status().unwrap();
+            assert_eq!(status.consecutive_failures, 1);
+            assert!(status.last_error.is_some());
+            state.export_bundle().await.unwrap();
+            assert_eq!(
+                state.key_maintenance_status().unwrap().consecutive_failures,
+                0
+            );
+            drop(state);
+            cleanup_paths(&[&path]);
+        });
     }
 }
