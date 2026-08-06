@@ -1,0 +1,25 @@
+services:
+  safechat-relay:
+    build:
+      context: ./codebase
+      dockerfile: relay/Dockerfile
+    image: safechat-relay:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    ports:
+      - "8443:8443"
+    volumes:
+      - relay-data:/var/lib/safechat-relay
+      - ./relay-tls:/etc/safechat-relay/tls:ro
+
+volumes:
+  relay-data:

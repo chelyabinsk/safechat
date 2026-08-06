@@ -95,6 +95,26 @@ For quick manual chat, use the shortcuts directly at the prompt:
 
 The release archives contain both `safechat` and `safechat-ui` binaries.
 
+## Standalone relay server
+
+The relay is an independent Cargo package and does not depend on the client UI
+or client profile database. Build it with:
+
+```sh
+docker compose run --rm rust-dev cargo build --release --locked -p safechat-relay
+```
+
+For a native-TLS container deployment, provide certificates under
+`./relay-tls/` and use:
+
+```sh
+docker compose -f docker-compose.relay.yml up -d --build
+```
+
+See [`codebase/relay/README.md`](codebase/relay/README.md) and
+[`docs/RELAY_SERVER_PLAN.md`](docs/RELAY_SERVER_PLAN.md) for enrollment and
+deployment details.
+
 The low-level `safechat signal ...` commands also prompt for the encrypted
 database password. Existing plaintext `identity.db` files are rejected and
 must be migrated before use; they are never silently overwritten.

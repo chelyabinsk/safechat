@@ -1,0 +1,13 @@
+.git
+.gitignore
+.dockerignore
+target
+**/target
+*.db
+*.key
+*.private
+*.public
+*.bundle
+*.ciphertext
+*.txt
+carrier*.png

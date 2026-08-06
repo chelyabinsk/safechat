@@ -23,6 +23,9 @@ codebase/bob.txt
 # Local two-user demo state and plaintext/ciphertext samples.
 demo/
 
+# Native TLS material for the local relay deployment.
+relay-tls/
+
 # Editor and OS files.
 .DS_Store
 .vscode/
