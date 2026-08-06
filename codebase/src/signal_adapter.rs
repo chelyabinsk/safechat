@@ -660,6 +660,13 @@ impl SqliteSignalState {
         Ok(identity_fingerprint(pair.identity_key()))
     }
 
+    /// Return the local identity key pair to a client-side transport signer.
+    /// The caller must keep it in memory only and never send the private key
+    /// to a relay or carrier.
+    pub async fn local_identity_key_pair(&self) -> Result<IdentityKeyPair> {
+        Ok(self.store.identity_store.get_identity_key_pair().await?)
+    }
+
     /// Record a peer identity only after its fingerprint was verified.
     pub async fn trust_peer(
         &mut self,

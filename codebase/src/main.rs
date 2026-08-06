@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
 use dialoguer::Password;
 use png::{ColorType, Decoder, Transformations};
@@ -123,6 +124,11 @@ enum SignalCommand {
         /// Read the input as URL-safe Base64 text instead of binary bytes.
         #[arg(long)]
         base64: bool,
+    },
+    /// Print the public identity key needed by a relay administrator.
+    IdentityKey {
+        #[arg(long)]
+        database: PathBuf,
     },
 }
 
@@ -280,6 +286,16 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
                 fs::write(&output, plaintext)
                     .with_context(|| format!("writing plaintext output {}", output.display()))?;
                 println!("decrypted message from {}", sender_address);
+            }
+            SignalCommand::IdentityKey { database } => {
+                let password = database_password()?;
+                let state = signal_adapter::SqliteSignalState::open(&database, &password).await?;
+                let identity = state.local_identity_key_pair().await?;
+                println!(
+                    "identity key: {}",
+                    URL_SAFE_NO_PAD.encode(identity.identity_key().serialize().as_ref())
+                );
+                println!("fingerprint: {}", state.local_identity_fingerprint().await?);
             }
         }
         Ok(())

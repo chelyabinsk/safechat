@@ -48,6 +48,9 @@ enum Command {
         tls_cert: PathBuf,
         #[arg(long)]
         tls_key: PathBuf,
+        /// Enable the live administrative allowlist endpoint.
+        #[arg(long, env = "SAFECHAT_RELAY_ADMIN_TOKEN")]
+        admin_token: Option<String>,
     },
     AllowlistAdd {
         #[arg(long)]
@@ -69,11 +72,30 @@ enum Command {
         #[arg(long)]
         client_id: String,
     },
+    AllowlistAddRemote {
+        #[arg(long)]
+        url: String,
+        #[arg(long, env = "SAFECHAT_RELAY_ADMIN_TOKEN")]
+        admin_token: String,
+        #[arg(long)]
+        ca_cert: Option<PathBuf>,
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        identity_key: String,
+        #[arg(long)]
+        fingerprint: String,
+        #[arg(long)]
+        enrollment_secret: String,
+        #[arg(long, default_value = "")]
+        label: String,
+    },
 }
 
 #[derive(Clone)]
 struct AppState {
     db: Arc<Mutex<Connection>>,
+    admin_token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -91,7 +113,7 @@ struct ChallengeRequest {
     enrollment_secret: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct ChallengeResponse {
     challenge: String,
     expires_at: u64,
@@ -106,11 +128,11 @@ struct RegisterRequest {
     signature: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct RegisterResponse {
     access_token: String,
     device_id: String,
-    api_version: &'static str,
+    api_version: String,
 }
 
 #[derive(Deserialize)]
@@ -118,7 +140,7 @@ struct BundleRequest {
     bundle: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct BundleResponse {
     device_id: String,
     bundle: String,
@@ -132,10 +154,11 @@ struct MessageRequest {
     expires_at: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct MessageResponse {
     server_id: i64,
     sender: String,
+    sender_address: Option<String>,
     message_id: String,
     ciphertext: String,
     accepted_at: u64,
@@ -145,6 +168,16 @@ struct MessageResponse {
 #[derive(Deserialize)]
 struct AckRequest {
     acknowledged: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AdminAllowlistRequest {
+    client_id: String,
+    identity_key: String,
+    fingerprint: String,
+    enrollment_secret: String,
+    #[serde(default)]
+    label: String,
 }
 
 #[tokio::main]
@@ -189,16 +222,45 @@ async fn main() -> anyhow::Result<()> {
             )?;
             println!("revoked {client_id}");
         }
+        Command::AllowlistAddRemote {
+            url,
+            admin_token,
+            ca_cert,
+            client_id,
+            identity_key,
+            fingerprint,
+            enrollment_secret,
+            label,
+        } => {
+            allowlist_add_remote(
+                &url,
+                &admin_token,
+                ca_cert.as_deref(),
+                AdminAllowlistRequest {
+                    client_id,
+                    identity_key,
+                    fingerprint,
+                    enrollment_secret,
+                    label,
+                },
+            )?;
+            println!("allowlisted client through relay");
+        }
         Command::Serve {
             bind,
             database,
             tls_cert,
             tls_key,
+            admin_token,
         } => {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .ok();
             let connection = open_database(&database)?;
             initialize_schema(&connection)?;
             let state = AppState {
                 db: Arc::new(Mutex::new(connection)),
+                admin_token,
             };
             let app = router(state);
             let config = RustlsConfig::from_pem_file(tls_cert, tls_key).await?;
@@ -211,20 +273,89 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn allowlist_add_remote(
+    base_url: &str,
+    admin_token: &str,
+    ca_cert: Option<&std::path::Path>,
+    request: AdminAllowlistRequest,
+) -> anyhow::Result<()> {
+    let parsed = reqwest::Url::parse(base_url)?;
+    if parsed.scheme() != "https" {
+        anyhow::bail!("relay URL must use HTTPS");
+    }
+    let mut builder = reqwest::blocking::Client::builder();
+    if let Some(path) = ca_cert {
+        builder =
+            builder.add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(path)?)?);
+    }
+    let client = builder.build()?;
+    let response = client
+        .post(format!(
+            "{}/v1/admin/allowlist",
+            base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(admin_token)
+        .json(&request)
+        .send()?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        anyhow::bail!("relay admin request failed with {status}: {body}");
+    }
+    println!("{body}");
+    Ok(())
+}
+
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/capabilities", get(capabilities))
+        .route("/v1/admin/allowlist", post(admin_allowlist))
         .route("/v1/devices/challenge", post(challenge))
         .route("/v1/devices/register", post(register))
         .route(
             "/v1/devices/{device}/bundle",
             put(publish_bundle).get(fetch_bundle),
         )
+        .route(
+            "/v1/devices/by-address/{address}/bundle",
+            get(fetch_bundle_by_address),
+        )
         .route("/v1/messages", post(send_message).get(receive_messages))
+        .route("/v1/messages/status", get(message_status))
         .route("/v1/messages/{server_id}/ack", post(ack_message))
         .route("/v1/events", get(events))
         .with_state(state)
+}
+
+async fn admin_allowlist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(request): axum::Json<AdminAllowlistRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let Some(expected) = state.admin_token.as_deref() else {
+        return Err(not_found());
+    };
+    let Some(provided) = bearer(&headers) else {
+        return Err(unauthorized());
+    };
+    if provided != expected {
+        return Err(unauthorized());
+    }
+    let db = state.db.lock().await;
+    add_allowlist(
+        &db,
+        &request.client_id,
+        &request.identity_key,
+        &request.fingerprint,
+        &request.enrollment_secret,
+        &request.label,
+    )
+    .map_err(internal)?;
+    Ok(axum::Json(json!({
+        "allowlisted": true,
+        "client_id": request.client_id,
+    })))
 }
 
 async fn health() -> impl IntoResponse {
@@ -310,7 +441,7 @@ async fn register(
         params![request.client_id, request.device_address],
     )
     .map_err(internal)?;
-    db.execute("INSERT OR REPLACE INTO devices(client_id, identity_key, device_address, token_hash, bundle, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![request.client_id, identity_bytes, request.device_address, hash_bytes(&token), bundle, now() as i64]).map_err(internal)?;
+    db.execute("INSERT OR REPLACE INTO devices(client_id, identity_key, device_address, token_hash, bundle, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![request.client_id, identity_bytes, request.device_address, hash(&b64(&token)), bundle, now() as i64]).map_err(internal)?;
     db.execute(
         "DELETE FROM challenges WHERE client_id = ?1",
         params![request.client_id],
@@ -319,7 +450,7 @@ async fn register(
     Ok(axum::Json(RegisterResponse {
         access_token: b64(&token),
         device_id: request.client_id,
-        api_version: API_VERSION,
+        api_version: API_VERSION.to_owned(),
     }))
 }
 
@@ -368,11 +499,34 @@ async fn fetch_bundle(
     )
     .await?;
     let db = state.db.lock().await;
-    let bundle: Vec<u8> = db
+    let bundle: (String, Vec<u8>) = db
         .query_row(
-            "SELECT bundle FROM devices WHERE client_id = ?1",
+            "SELECT client_id, bundle FROM devices WHERE client_id = ?1 OR device_address = ?1",
             params![device],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    Ok(axum::Json(BundleResponse {
+        device_id: bundle.0,
+        bundle: b64(&bundle.1),
+    }))
+}
+
+async fn fetch_bundle_by_address(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+    headers: HeaderMap,
+) -> Result<axum::Json<BundleResponse>, ApiError> {
+    let path = format!("/v1/devices/by-address/{address}/bundle");
+    authenticate_request(&state, &headers, "GET", &path, &[], None).await?;
+    let db = state.db.lock().await;
+    let (device, bundle): (String, Vec<u8>) = db
+        .query_row(
+            "SELECT client_id, bundle FROM devices WHERE device_address = ?1",
+            params![address],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(internal)?
@@ -400,19 +554,17 @@ async fn send_message(
         ));
     }
     let db = state.db.lock().await;
-    let exists: Option<i64> = db
+    let recipient_id: String = db
         .query_row(
-            "SELECT 1 FROM devices WHERE client_id = ?1",
+            "SELECT client_id FROM devices WHERE client_id = ?1 OR device_address = ?1",
             params![request.recipient],
             |row| row.get(0),
         )
         .optional()
-        .map_err(internal)?;
-    if exists.is_none() {
-        return Err(not_found());
-    }
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
     let accepted_at = now();
-    let result = db.execute("INSERT OR IGNORE INTO messages(sender, recipient, client_message_id, ciphertext, accepted_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![sender, request.recipient, request.message_id, ciphertext, accepted_at as i64, request.expires_at.map(|x| x as i64)]).map_err(internal)?;
+    let result = db.execute("INSERT OR IGNORE INTO messages(sender, recipient, client_message_id, ciphertext, accepted_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![sender, recipient_id, request.message_id, ciphertext, accepted_at as i64, request.expires_at.map(|x| x as i64)]).map_err(internal)?;
     if result == 0 {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -423,6 +575,7 @@ async fn send_message(
     Ok(axum::Json(MessageResponse {
         server_id: id,
         sender,
+        sender_address: None,
         message_id: request.message_id,
         ciphertext: request.ciphertext,
         accepted_at,
@@ -443,16 +596,17 @@ async fn receive_messages(
         params![now() as i64],
     )
     .map_err(internal)?;
-    let mut statement = db.prepare("SELECT server_id, sender, client_message_id, ciphertext, accepted_at, expires_at FROM messages WHERE recipient = ?1 AND server_id > ?2 AND acknowledged_at IS NULL ORDER BY server_id LIMIT 100").map_err(internal)?;
+    let mut statement = db.prepare("SELECT messages.server_id, messages.sender, devices.device_address, messages.client_message_id, messages.ciphertext, messages.accepted_at, messages.expires_at FROM messages LEFT JOIN devices ON devices.client_id = messages.sender WHERE messages.recipient = ?1 AND messages.server_id > ?2 AND messages.acknowledged_at IS NULL ORDER BY messages.server_id LIMIT 100").map_err(internal)?;
     let rows = statement
         .query_map(params![recipient, query.cursor.unwrap_or(0)], |row| {
             Ok(MessageResponse {
                 server_id: row.get(0)?,
                 sender: row.get(1)?,
-                message_id: row.get(2)?,
-                ciphertext: b64(&row.get::<_, Vec<u8>>(3)?),
-                accepted_at: row.get::<_, i64>(4)? as u64,
-                expires_at: row.get::<_, Option<i64>>(5)?.map(|x| x as u64),
+                sender_address: row.get(2)?,
+                message_id: row.get(3)?,
+                ciphertext: b64(&row.get::<_, Vec<u8>>(4)?),
+                accepted_at: row.get::<_, i64>(5)? as u64,
+                expires_at: row.get::<_, Option<i64>>(6)?.map(|x| x as u64),
             })
         })
         .map_err(internal)?;
@@ -467,12 +621,52 @@ struct CursorQuery {
     cursor: Option<i64>,
 }
 
+#[derive(Deserialize)]
+struct MessageStatusQuery {
+    message_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct MessageStatusResponse {
+    message_id: String,
+    status: String,
+}
+
+async fn message_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<MessageStatusQuery>,
+) -> Result<axum::Json<MessageStatusResponse>, ApiError> {
+    let sender =
+        authenticate_request(&state, &headers, "GET", "/v1/messages/status", &[], None).await?;
+    let db = state.db.lock().await;
+    let acknowledged_at: Option<Option<i64>> = db
+        .query_row(
+            "SELECT acknowledged_at FROM messages WHERE sender = ?1 AND client_message_id = ?2",
+            params![sender, query.message_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some(acknowledged_at) = acknowledged_at else {
+        return Err(not_found());
+    };
+    Ok(axum::Json(MessageStatusResponse {
+        message_id: query.message_id,
+        status: if acknowledged_at.is_some() {
+            "read".to_owned()
+        } else {
+            "sent".to_owned()
+        },
+    }))
+}
+
 async fn ack_message(
     State(state): State<AppState>,
     Path(server_id): Path<i64>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, ApiError> {
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
     let recipient = authenticate_request(
         &state,
         &headers,
@@ -497,7 +691,7 @@ async fn ack_message(
     if changed == 0 {
         return Err(not_found());
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(axum::Json(json!({"acknowledged": true})))
 }
 
 async fn events(
@@ -537,7 +731,7 @@ async fn websocket(mut socket: WebSocket, state: AppState, device: String) {
                     continue;
                 }
                 let db = state.db.lock().await;
-                let rows = db.prepare("SELECT server_id, sender, client_message_id, ciphertext, accepted_at, expires_at FROM messages WHERE recipient = ?1 AND server_id > ?2 AND acknowledged_at IS NULL ORDER BY server_id LIMIT 100").and_then(|mut statement| statement.query_map(params![device, request.cursor], |row| Ok(MessageResponse { server_id: row.get(0)?, sender: row.get(1)?, message_id: row.get(2)?, ciphertext: b64(&row.get::<_, Vec<u8>>(3)?), accepted_at: row.get::<_, i64>(4)? as u64, expires_at: row.get::<_, Option<i64>>(5)?.map(|x| x as u64) })).and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())).unwrap_or_default();
+                let rows = db.prepare("SELECT messages.server_id, messages.sender, devices.device_address, messages.client_message_id, messages.ciphertext, messages.accepted_at, messages.expires_at FROM messages LEFT JOIN devices ON devices.client_id = messages.sender WHERE messages.recipient = ?1 AND messages.server_id > ?2 AND messages.acknowledged_at IS NULL ORDER BY messages.server_id LIMIT 100").and_then(|mut statement| statement.query_map(params![device, request.cursor], |row| Ok(MessageResponse { server_id: row.get(0)?, sender: row.get(1)?, sender_address: row.get(2)?, message_id: row.get(3)?, ciphertext: b64(&row.get::<_, Vec<u8>>(4)?), accepted_at: row.get::<_, i64>(5)? as u64, expires_at: row.get::<_, Option<i64>>(6)?.map(|x| x as u64) })).and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())).unwrap_or_default();
                 if let Ok(payload) = serde_json::to_string(&rows) {
                     let _ = socket.send(Message::Text(payload.into())).await;
                 }
@@ -750,7 +944,10 @@ fn internal<E: std::fmt::Display>(error: E) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::to_bytes, http::Request};
     use signal_protocol::IdentityKeyPair;
+    use std::{fs, path::PathBuf};
+    use tower::ServiceExt;
 
     fn test_database() -> Connection {
         let database = Connection::open_in_memory().unwrap();
@@ -798,5 +995,337 @@ mod tests {
         payload.extend(42u64.to_be_bytes());
         assert!(payload.starts_with(REQUEST_DOMAIN));
         assert_ne!(payload, [&b"GET"[..], b"/v1/messages"].concat());
+    }
+
+    #[tokio::test]
+    async fn http_registration_and_queue_flow_requires_signed_requests() {
+        let database = test_database();
+        let mut rng = rand::rng();
+        let identity = IdentityKeyPair::generate(&mut rng);
+        let client_id = "client-a";
+        let identity_bytes = identity.identity_key().serialize();
+        add_allowlist(
+            &database,
+            client_id,
+            &b64(&identity_bytes),
+            "fingerprint-a",
+            "enrollment-secret",
+            "Alice",
+        )
+        .unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(database)),
+            admin_token: None,
+        };
+        let app = router(state.clone());
+        let challenge_body = serde_json::to_vec(&json!({
+            "client_id": client_id,
+            "enrollment_secret": "enrollment-secret"
+        }))
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/devices/challenge")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(challenge_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let challenge: ChallengeResponse = serde_json::from_slice(&response_body).unwrap();
+        let challenge_bytes = b64decode(&challenge.challenge).unwrap();
+        let bundle = b"opaque-public-bundle";
+        let device_address = "alice.1";
+        let mut register_payload = REGISTER_DOMAIN.to_vec();
+        register_payload.extend(client_id.as_bytes());
+        register_payload.push(0);
+        register_payload.extend(device_address.as_bytes());
+        register_payload.push(0);
+        register_payload.extend(Sha256::digest(bundle));
+        register_payload.extend(challenge_bytes);
+        let signature = identity
+            .private_key()
+            .calculate_signature(&register_payload, &mut rng)
+            .unwrap();
+        let register_body = serde_json::to_vec(&json!({
+            "client_id": client_id,
+            "device_address": device_address,
+            "identity_key": b64(&identity_bytes),
+            "bundle": b64(bundle),
+            "signature": b64(&signature)
+        }))
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/devices/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(register_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let registered: RegisterResponse = serde_json::from_slice(&response_body).unwrap();
+
+        let (mut headers, _) = signed_headers(
+            &identity,
+            &registered.access_token,
+            "GET",
+            "/v1/messages",
+            &[],
+            "nonce-invalid-signature",
+        );
+        headers.insert("x-safechat-signature", "not-a-signature".parse().unwrap());
+        let mut request = Request::get("/v1/messages")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let message_body = serde_json::to_vec(&json!({
+            "recipient": client_id,
+            "message_id": "message-1",
+            "ciphertext": b64(b"opaque-ciphertext")
+        }))
+        .unwrap();
+        let replay_body = message_body.clone();
+        let (headers, nonce) = signed_headers(
+            &identity,
+            &registered.access_token,
+            "POST",
+            "/v1/messages",
+            &message_body,
+            "nonce-message",
+        );
+        let mut request = Request::post("/v1/messages")
+            .body(axum::body::Body::from(message_body))
+            .unwrap();
+        *request.headers_mut() = headers;
+        let response = app.clone().oneshot(request).await.unwrap();
+        if response.status() != StatusCode::OK {
+            let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+            panic!(
+                "message submission failed: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+
+        let (headers, _) = signed_headers(
+            &identity,
+            &registered.access_token,
+            "GET",
+            "/v1/messages",
+            &[],
+            "nonce-receive",
+        );
+        let mut request = Request::get("/v1/messages?cursor=0")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let messages: Vec<MessageResponse> = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_id, "message-1");
+
+        let (headers, _) = signed_headers(
+            &identity,
+            &registered.access_token,
+            "GET",
+            "/v1/messages/status",
+            &[],
+            "nonce-status-sent",
+        );
+        let mut request = Request::get("/v1/messages/status?message_id=message-1")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let status: MessageStatusResponse = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(status.status, "sent");
+
+        let ack_body = br#"{"acknowledged":true}"#.to_vec();
+        let ack_path = format!("/v1/messages/{}/ack", messages[0].server_id);
+        let (headers, _) = signed_headers(
+            &identity,
+            &registered.access_token,
+            "POST",
+            &ack_path,
+            &ack_body,
+            "nonce-ack",
+        );
+        let mut request = Request::post(&ack_path)
+            .body(axum::body::Body::from(ack_body))
+            .unwrap();
+        *request.headers_mut() = headers;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (headers, _) = signed_headers(
+            &identity,
+            &registered.access_token,
+            "GET",
+            "/v1/messages/status",
+            &[],
+            "nonce-status-read",
+        );
+        let mut request = Request::get("/v1/messages/status?message_id=message-1")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let status: MessageStatusResponse = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(status.status, "read");
+
+        let (headers, _) = signed_headers(
+            &identity,
+            &registered.access_token,
+            "POST",
+            "/v1/messages",
+            &replay_body,
+            &nonce,
+        );
+        let mut request = Request::post("/v1/messages")
+            .body(axum::body::Body::from(replay_body))
+            .unwrap();
+        *request.headers_mut() = headers;
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn live_admin_allowlisting_works_without_restarting_the_server() {
+        let database = test_database();
+        let mut rng = rand::rng();
+        let identity = IdentityKeyPair::generate(&mut rng);
+        let state = AppState {
+            db: Arc::new(Mutex::new(database)),
+            admin_token: Some("admin-secret".to_owned()),
+        };
+        let app = router(state.clone());
+        let body = serde_json::to_vec(&json!({
+            "client_id": "client-live",
+            "identity_key": b64(identity.identity_key().serialize().as_ref()),
+            "fingerprint": "fingerprint-live",
+            "enrollment_secret": "enrollment-live",
+            "label": "Live client"
+        }))
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::post("/v1/admin/allowlist")
+                    .header("authorization", "Bearer admin-secret")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let database = state.db.lock().await;
+        let stored: String = database
+            .query_row(
+                "SELECT fingerprint FROM allowlist WHERE client_id = 'client-live'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "fingerprint-live");
+    }
+
+    #[tokio::test]
+    async fn real_loopback_tls_server_accepts_https_health_requests() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let suffix = format!("{}-{}", std::process::id(), rand::random::<u64>());
+        let certificate_path = std::env::temp_dir().join(format!("safechat-relay-{suffix}.crt"));
+        let key_path = std::env::temp_dir().join(format!("safechat-relay-{suffix}.key"));
+        fs::write(&certificate_path, certificate.cert.pem()).unwrap();
+        fs::write(&key_path, certificate.key_pair.serialize_pem()).unwrap();
+
+        let database = test_database();
+        let state = AppState {
+            db: Arc::new(Mutex::new(database)),
+            admin_token: None,
+        };
+        let config = RustlsConfig::from_pem_file(&certificate_path, &key_path)
+            .await
+            .unwrap();
+        let handle = axum_server::Handle::new();
+        let server = axum_server::bind_rustls(([127, 0, 0, 1], 0).into(), config)
+            .handle(handle.clone())
+            .serve(router(state).into_make_service());
+        let server_task = tokio::spawn(server);
+        let address = handle.listening().await.unwrap();
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+
+        let response = client
+            .get(format!("https://{address}/v1/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["api_version"], API_VERSION);
+
+        handle.shutdown();
+        server_task.await.unwrap().unwrap();
+        remove_test_file(&certificate_path);
+        remove_test_file(&key_path);
+    }
+
+    fn remove_test_file(path: &PathBuf) {
+        let _ = fs::remove_file(path);
+    }
+
+    fn signed_headers(
+        identity: &IdentityKeyPair,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        nonce: &str,
+    ) -> (HeaderMap, String) {
+        let timestamp = now();
+        let mut payload = REQUEST_DOMAIN.to_vec();
+        payload.extend(method.as_bytes());
+        payload.push(0);
+        payload.extend(path.as_bytes());
+        payload.push(0);
+        payload.extend(Sha256::digest(body));
+        payload.extend(nonce.as_bytes());
+        payload.push(0);
+        payload.extend(timestamp.to_be_bytes());
+        let mut rng = rand::rng();
+        let signature = identity
+            .private_key()
+            .calculate_signature(&payload, &mut rng)
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        headers.insert("x-safechat-nonce", nonce.parse().unwrap());
+        headers.insert(
+            "x-safechat-timestamp",
+            timestamp.to_string().parse().unwrap(),
+        );
+        headers.insert("x-safechat-signature", b64(&signature).parse().unwrap());
+        (headers, nonce.to_owned())
     }
 }

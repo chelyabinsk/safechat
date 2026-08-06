@@ -1,8 +1,20 @@
+# syntax=docker/dockerfile:1
+
 FROM rust:1-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+        ca-certificates \
+        git \
+        pkg-config \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p safechat-relay
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --locked -p safechat-relay
 
 FROM debian:bookworm-slim
 

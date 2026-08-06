@@ -168,6 +168,7 @@ fingerprint verification remains a client responsibility.
 POST /v1/messages
 GET  /v1/messages?cursor={cursor}
 POST /v1/messages/{server_id}/ack
+GET  /v1/messages/status?message_id={message_id}
 GET  /v1/events                         # HTTPS WebSocket upgrade
 ```
 

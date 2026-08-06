@@ -69,9 +69,43 @@ Use `/add-peer` to create another private lobby, `/peers` to list participants,
 and `/use NAME` to switch the active lobby. Messages are sent only to the
 currently selected peer.
 
+### Relay-backed UI
+
+Start the UI with the allowlisted client ID and relay URL:
+
+```sh
+docker compose run --rm rust-dev cargo run --locked --bin safechat-ui -- \
+  --relay-url https://relay.example \
+  --relay-enrollment-secret '<one-time-secret>'
+```
+
+For a local test relay using a self-signed certificate, add
+`--relay-ca-cert /path/to/ca.pem`. On first launch the UI registers the
+device and stores the resulting relay session token encrypted with the
+profile password. If `--relay-client-id` is omitted, the UI generates a
+stable client ID from the local identity and displays the client ID, public
+identity key, and fingerprint for the relay administrator to allowlist. The
+UI waits for allowlisting and can retry enrollment without restarting. The
+enrollment secret is not needed on later launches.
+
+At startup, choose Copy/paste or Relay. With Relay selected, `/add-peer`
+fetches a peer's public bundle from the relay and confirms its fingerprint.
+Relay mode behaves like a normal messenger: type ordinary text to encrypt and
+send it, while the UI checks for and displays incoming messages automatically.
+`/s` and `/send` remain available as explicit send aliases, and `/r` and
+`/receive` remain available for manual polling. Use `/transport` to view or
+change the active mode. `/r <ciphertext>` always remains available for manual
+decryption.
+
 Each UI message carries a random authenticated message ID. It is not shown as
 chat content, but it prevents the same logical message from being inserted
 into a lobby history more than once.
+
+Relay messages are timestamped in live output and encrypted history. Outgoing
+relay messages show `[sent]` after the relay accepts them; this means the
+server has queued the message, not that the recipient has opened it. Incoming
+messages are acknowledged by the recipient and shown with their receive
+timestamp.
 
 Use `/keys` for local prekey inventory and rotation diagnostics. If the device
 identity is compromised or must be replaced, use `/replace-identity`; this
@@ -84,14 +118,15 @@ requires fresh verification before it can be used again.
 Use `/keys` to see persistent maintenance-failure counts and the last error;
 repeated replenishment or rotation failures are shown as an alert.
 
-For quick manual chat, use the shortcuts directly at the prompt:
+For copy/paste chat, use the shortcuts directly at the prompt:
 
 ```text
 /s hello Bob
 /r safechat-text-v1:...
 ```
 
-`/s` prints the ciphertext in the chat; `/r` prints the decrypted message.
+In copy/paste mode, `/s` prints the ciphertext in the chat and `/r` prints the
+decrypted message. In relay mode, ordinary text is the normal send action.
 
 The release archives contain both `safechat` and `safechat-ui` binaries.
 

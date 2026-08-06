@@ -1,9 +1,13 @@
 services:
   safechat-relay:
+    container_name: safechat-relay
     build:
       context: ./codebase
       dockerfile: relay/Dockerfile
     image: safechat-relay:latest
+    user: ${SAFECHAT_RELAY_USER:-safechat-relay}
+    environment:
+      SAFECHAT_RELAY_ADMIN_TOKEN: ${SAFECHAT_RELAY_ADMIN_TOKEN:?set an admin token before starting the relay}
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -18,8 +22,8 @@ services:
     ports:
       - "8443:8443"
     volumes:
-      - relay-data:/var/lib/safechat-relay
-      - ./relay-tls:/etc/safechat-relay/tls:ro
+      - ${SAFECHAT_RELAY_DATA_DIR:-relay-data}:/var/lib/safechat-relay
+      - ${SAFECHAT_RELAY_TLS_DIR:-./relay-tls}:/etc/safechat-relay/tls:ro,Z
 
 volumes:
   relay-data:

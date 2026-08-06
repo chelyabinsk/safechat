@@ -10,9 +10,16 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+rustls = { version = "0.23", features = ["ring"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 signal-protocol = { package = "libsignal-protocol", git = "https://github.com/signalapp/libsignal.git", rev = "b5121d07c72f9e631f178d907ca892587f64f9e2" }
+
+[dev-dependencies]
+rcgen = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tower = { version = "0.5", features = ["util"] }

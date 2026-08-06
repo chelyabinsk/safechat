@@ -1,16 +1,22 @@
 use age::{Decryptor, Encryptor};
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
+use console::{Key, Term};
 use dialoguer::{Confirm, Input, Password, Select};
 use directories::ProjectDirs;
+use safechat::relay_client::{RelayClient, RelayClientConfig};
 use safechat::signal_adapter::{
     MessageId, SignalPreKeyBundle, SqliteSignalState, identity_fingerprint,
 };
 use safechat::transport::{BundleTransport, RecoveryTransport, TextTransport};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,6 +31,18 @@ struct Cli {
     /// Override the platform application-data directory.
     #[arg(long)]
     data_dir: Option<PathBuf>,
+    /// Relay HTTPS endpoint. Supplying this enables relay-backed /s and /r.
+    #[arg(long)]
+    relay_url: Option<String>,
+    /// Allowlisted relay client ID.
+    #[arg(long)]
+    relay_client_id: Option<String>,
+    /// One-time enrollment secret, used only when no saved relay session exists.
+    #[arg(long)]
+    relay_enrollment_secret: Option<String>,
+    /// Optional CA certificate for a local/test relay.
+    #[arg(long)]
+    relay_ca_cert: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -34,6 +52,8 @@ struct ProfilePaths {
     history: PathBuf,
     lobby_histories: PathBuf,
     peers: PathBuf,
+    relay_session: PathBuf,
+    relay_peers: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,6 +73,8 @@ struct HistoryEntry {
     peer: String,
     #[serde(default)]
     ciphertext: String,
+    #[serde(default)]
+    delivery_status: String,
 }
 
 #[derive(Clone, Copy)]
@@ -61,9 +83,21 @@ enum HistoryView {
     Clean,
 }
 
+struct RelayRuntime {
+    client: RelayClient,
+    peer_ids: HashMap<String, String>,
+}
+
+struct RelayOptions {
+    base_url: String,
+    client_id: String,
+    enrollment_secret: String,
+    ca_certificate_pem: Option<Vec<u8>>,
+}
+
 fn main() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
-    let paths = ProfilePaths::new(cli.data_dir, &cli.profile)?;
+    let paths = ProfilePaths::new(cli.data_dir.clone(), &cli.profile)?;
     paths.create()?;
     let password = unlock_password(&paths.history)?;
     let mut state = futures_executor::block_on(open_or_initialize(&paths, &password))?;
@@ -73,10 +107,20 @@ fn main() -> Result<()> {
     futures_executor::block_on(state.export_bundle())?;
 
     let mut peers = load_peers(&paths.peers)?;
+    let relay_options = choose_transport(&cli)?;
+    let mut relay = setup_relay(&paths, &password, &mut state, relay_options.as_ref())?;
     if peers.is_empty() {
         println!("No conversation is configured yet.");
-        println!("We will create your identity and guide you through setup.");
-        peers.push(futures_executor::block_on(setup_peer(&paths, &mut state))?);
+        let peer = if let Some(runtime) = relay.as_mut() {
+            let name = Input::<String>::new()
+                .with_prompt("Peer relay client ID")
+                .interact_text()?;
+            add_relay_peer(&paths, &password, &mut state, runtime, &name)?
+        } else {
+            println!("We will create your identity and guide you through setup.");
+            futures_executor::block_on(setup_peer(&paths, &mut state))?
+        };
+        peers.push(peer);
     }
 
     let legacy_history = paths
@@ -114,9 +158,129 @@ fn main() -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let view = choose_history_view()?;
-    show_history(&histories[0], view);
-    chat_loop(&paths, &password, &mut histories, &mut state, peers)
+    if let Some(history) = histories.first() {
+        show_history(history, HistoryView::Clean);
+    } else {
+        println!("No private lobby configured. Use /add-peer.");
+    }
+    chat_loop(&paths, &password, &mut histories, &mut state, peers, relay)
+}
+
+fn setup_relay(
+    paths: &ProfilePaths,
+    password: &str,
+    state: &mut SqliteSignalState,
+    options: Option<&RelayOptions>,
+) -> Result<Option<RelayRuntime>> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let identity = futures_executor::block_on(state.local_identity_key_pair())?;
+    let client_id = if options.client_id.is_empty() {
+        generated_relay_client_id(&identity)
+    } else {
+        options.client_id.clone()
+    };
+    let config = RelayClientConfig {
+        base_url: options.base_url.clone(),
+        client_id: client_id.clone(),
+        enrollment_secret: options.enrollment_secret.clone(),
+        ca_certificate_pem: options.ca_certificate_pem.clone(),
+    };
+    let mut client = RelayClient::new(config, identity)?;
+    if paths.relay_session.exists() {
+        let token = load_relay_token(&paths.relay_session, password)?;
+        client.restore_access_token(token);
+    } else {
+        let bundle = futures_executor::block_on(state.export_bundle())?;
+        println!("Relay enrollment details:");
+        println!("Client ID: {client_id}");
+        println!(
+            "Identity key: {}",
+            URL_SAFE_NO_PAD.encode(identity.identity_key().serialize().as_ref())
+        );
+        println!(
+            "Fingerprint: {}",
+            futures_executor::block_on(state.local_identity_fingerprint())?
+        );
+        let registration = loop {
+            match client.register(&bundle) {
+                Ok(registration) => break registration,
+                Err(error) => {
+                    println!("Relay enrollment is not complete: {error:#}");
+                    println!("Have the administrator allowlist the details above, then retry.");
+                    if !Confirm::new()
+                        .with_prompt("Retry relay enrollment now?")
+                        .default(true)
+                        .interact()?
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        };
+        save_relay_token(&paths.relay_session, password, &registration.access_token)?;
+    }
+    println!("Relay transport enabled for {client_id}.");
+    Ok(Some(RelayRuntime {
+        client,
+        peer_ids: load_relay_peer_ids(&paths.relay_peers, password)?,
+    }))
+}
+
+fn generated_relay_client_id(identity: &signal_protocol::IdentityKeyPair) -> String {
+    let digest = Sha256::digest(identity.identity_key().serialize().as_ref());
+    format!("sc-{}", URL_SAFE_NO_PAD.encode(&digest[..12]))
+}
+
+fn choose_transport(cli: &Cli) -> Result<Option<RelayOptions>> {
+    let choices = ["Copy/paste", "Relay"];
+    let choice = Select::new()
+        .with_prompt("Transport")
+        .items(&choices)
+        .default(if cli.relay_url.is_some() { 1 } else { 0 })
+        .interact()?;
+    if choice == 0 {
+        return Ok(None);
+    }
+    Ok(Some(prompt_relay_options(
+        cli.relay_url.as_ref(),
+        cli.relay_client_id.as_ref(),
+        cli.relay_enrollment_secret.as_ref(),
+        cli.relay_ca_cert.as_ref(),
+    )?))
+}
+
+fn prompt_relay_options(
+    base_url: Option<&String>,
+    client_id: Option<&String>,
+    enrollment_secret: Option<&String>,
+    ca_certificate: Option<&PathBuf>,
+) -> Result<RelayOptions> {
+    let base_url = base_url.cloned().unwrap_or_else(|| {
+        Input::<String>::new()
+            .with_prompt("Relay HTTPS URL")
+            .interact_text()
+            .unwrap_or_default()
+    });
+    let client_id = client_id.cloned().unwrap_or_default();
+    let enrollment_secret = enrollment_secret.cloned().unwrap_or_else(|| {
+        Password::new()
+            .with_prompt("Relay enrollment secret (leave empty if already registered)")
+            .allow_empty_password(true)
+            .interact()
+            .unwrap_or_default()
+    });
+    let ca_certificate_pem = ca_certificate
+        .map(fs::read)
+        .transpose()
+        .context("reading relay CA certificate")?;
+    Ok(RelayOptions {
+        base_url,
+        client_id,
+        enrollment_secret,
+        ca_certificate_pem,
+    })
 }
 
 impl ProfilePaths {
@@ -136,6 +300,8 @@ impl ProfilePaths {
             history: root.join("chat-history.age"),
             lobby_histories: root.join("lobbies"),
             peers: root.join("peers"),
+            relay_session: root.join("relay-session.age"),
+            relay_peers: root.join("relay-peers.age"),
         })
     }
 
@@ -277,6 +443,41 @@ async fn setup_peer(
     Ok(bundle)
 }
 
+fn add_relay_peer(
+    paths: &ProfilePaths,
+    password: &str,
+    state: &mut SqliteSignalState,
+    runtime: &mut RelayRuntime,
+    client_id: &str,
+) -> Result<SignalPreKeyBundle> {
+    let relay_bundle = runtime.client.fetch_bundle(client_id)?;
+    let bundle = RelayClient::decode_bundle(&relay_bundle)?;
+    let fingerprint = identity_fingerprint(&bundle.identity_key()?);
+    println!(
+        "Relay returned {} with fingerprint: {fingerprint}",
+        bundle.address()
+    );
+    let expected = Input::<String>::new()
+        .with_prompt("Enter the fingerprint verified separately")
+        .interact_text()?;
+    if normalize_fingerprint(&expected) != normalize_fingerprint(&fingerprint) {
+        bail!("fingerprint does not match; the peer was not trusted");
+    }
+    futures_executor::block_on(state.trust_bundle(&bundle))?;
+    runtime
+        .peer_ids
+        .insert(bundle.name.clone(), client_id.to_owned());
+    save_relay_peer_ids(&paths.relay_peers, password, &runtime.peer_ids)?;
+    write_bundle(
+        &paths
+            .peers
+            .join(format!("{}.bundle", peer_file_component(&bundle))),
+        &bundle,
+    )?;
+    println!("Peer trusted through relay.");
+    Ok(bundle)
+}
+
 fn load_peers(directory: &Path) -> Result<Vec<SignalPreKeyBundle>> {
     let mut paths = fs::read_dir(directory)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -367,26 +568,13 @@ fn normalize_fingerprint(value: &str) -> String {
         .collect()
 }
 
-fn choose_history_view() -> Result<HistoryView> {
-    let choices = ["Show encrypted chat", "Show clean chat"];
-    let choice = Select::new()
-        .with_prompt("History view")
-        .items(&choices)
-        .default(0)
-        .interact()?;
-    Ok(if choice == 0 {
-        HistoryView::Ciphertext
-    } else {
-        HistoryView::Clean
-    })
-}
-
 fn chat_loop(
     paths: &ProfilePaths,
     password: &str,
     histories: &mut Vec<HistoryFile>,
     state: &mut SqliteSignalState,
     mut peers: Vec<SignalPreKeyBundle>,
+    mut relay: Option<RelayRuntime>,
 ) -> Result<()> {
     let mut current = 0;
     println!();
@@ -397,13 +585,24 @@ fn chat_loop(
     }
     println!("Type /help for commands.");
     loop {
-        let command = Input::<String>::new().with_prompt("> ").interact_text()?;
+        let command = if let Some(runtime) = relay.as_mut() {
+            read_relay_input(
+                paths,
+                password,
+                &mut histories[current],
+                state,
+                &peers[current],
+                runtime,
+            )?
+        } else {
+            Input::<String>::new().with_prompt("> ").interact_text()?
+        };
         let command = command.trim();
         if peers.is_empty()
             && (command.starts_with("/s ")
                 || command.starts_with("/r ")
                 || command.starts_with("/use ")
-                || matches!(command, "/send" | "/receive" | "/clean" | "/cipher"))
+                || matches!(command, "/r" | "/send" | "/receive" | "/clean" | "/cipher"))
         {
             println!("No active private lobby. Use /add-peer first.");
             continue;
@@ -419,6 +618,7 @@ fn chat_loop(
                     state,
                     &peers[current],
                     message.as_bytes(),
+                    relay.as_mut(),
                 )?;
             }
             continue;
@@ -434,18 +634,57 @@ fn chat_loop(
                     state,
                     &peers[current],
                     ciphertext,
+                    relay.as_mut(),
                 )?;
             }
             continue;
         }
+        if relay.is_some() && !command.starts_with('/') && !command.is_empty() {
+            send_plaintext(
+                paths,
+                password,
+                &mut histories[current],
+                state,
+                &peers[current],
+                command.as_bytes(),
+                relay.as_mut(),
+            )?;
+            continue;
+        }
         match command {
             "/help" => print_help(),
+            "/transport" => println!(
+                "Transport: {}",
+                if relay.is_some() {
+                    "Relay"
+                } else {
+                    "Copy/paste"
+                }
+            ),
+            "/transport copy" => {
+                relay = None;
+                println!("Transport changed to Copy/paste.");
+            }
+            "/transport relay" => {
+                let options = prompt_relay_options(None, None, None, None)?;
+                relay = setup_relay(paths, password, state, Some(&options))?;
+                println!("Transport changed to Relay.");
+            }
             "/send" => send_message(
                 paths,
                 password,
                 &mut histories[current],
                 state,
                 &peers[current],
+                relay.as_mut(),
+            )?,
+            "/r" => receive_message(
+                paths,
+                password,
+                &mut histories[current],
+                state,
+                &peers[current],
+                relay.as_mut(),
             )?,
             "/receive" => receive_message(
                 paths,
@@ -453,10 +692,18 @@ fn chat_loop(
                 &mut histories[current],
                 state,
                 &peers[current],
+                relay.as_mut(),
             )?,
             "/peers" => list_peers(&peers, current)?,
             "/add-peer" => {
-                let peer = futures_executor::block_on(setup_peer(paths, state))?;
+                let peer = if let Some(runtime) = relay.as_mut() {
+                    let name = Input::<String>::new()
+                        .with_prompt("Peer relay client ID")
+                        .interact_text()?;
+                    add_relay_peer(paths, password, state, runtime, &name)?
+                } else {
+                    futures_executor::block_on(setup_peer(paths, state))?
+                };
                 if let Some(index) = peers
                     .iter()
                     .position(|existing| existing.address() == peer.address())
@@ -661,8 +908,11 @@ fn chat_loop(
 }
 
 fn print_help() {
-    println!("/s <text>  encrypt and display a message's ciphertext");
-    println!("/r <cipher> decrypt a pasted ciphertext");
+    println!("In relay mode, type normal text to send it automatically.");
+    println!("/s <text>  send text (relay) or display ciphertext (copy/paste)");
+    println!("/r <cipher> decrypt a pasted ciphertext, or poll relay when used alone");
+    println!("/transport  show the active transport");
+    println!("/transport copy|relay  change transport");
     println!("/send      compose and encrypt a message");
     println!("/receive   paste and decrypt ciphertext");
     println!("/peers     list trusted peers and the active conversation");
@@ -699,6 +949,7 @@ fn send_message(
     history: &mut HistoryFile,
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
+    mut relay: Option<&mut RelayRuntime>,
 ) -> Result<()> {
     let choices = ["Type a message", "Cancel"];
     let choice = Select::new()
@@ -713,10 +964,11 @@ fn send_message(
             .into_bytes(),
         _ => return Ok(()),
     };
+    let encryption_peer = relay_peer_bundle(peer, relay.as_deref_mut())?;
     let (message_id, envelope) =
-        futures_executor::block_on(state.encrypt_message_for(peer, &plaintext))?;
+        futures_executor::block_on(state.encrypt_message_for(&encryption_peer, &plaintext))?;
     send_envelope(
-        paths, password, history, peer, message_id, &plaintext, &envelope,
+        paths, password, history, peer, message_id, &plaintext, &envelope, relay,
     )?;
     Ok(())
 }
@@ -728,14 +980,37 @@ fn send_plaintext(
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
     plaintext: &[u8],
+    mut relay: Option<&mut RelayRuntime>,
 ) -> Result<()> {
+    let encryption_peer = relay_peer_bundle(peer, relay.as_deref_mut())?;
     let (message_id, envelope) =
-        futures_executor::block_on(state.encrypt_message_for(peer, plaintext))?;
+        futures_executor::block_on(state.encrypt_message_for(&encryption_peer, plaintext))?;
     send_envelope(
-        paths, password, history, peer, message_id, plaintext, &envelope,
+        paths, password, history, peer, message_id, plaintext, &envelope, relay,
     )
 }
 
+fn relay_peer_bundle(
+    peer: &SignalPreKeyBundle,
+    relay: Option<&mut RelayRuntime>,
+) -> Result<SignalPreKeyBundle> {
+    let Some(runtime) = relay else {
+        return Ok(peer.clone());
+    };
+    let relay_bundle = if let Some(relay_id) = runtime.peer_ids.get(&peer.name) {
+        runtime.client.fetch_bundle(relay_id)?
+    } else {
+        let address = peer.address().to_string();
+        runtime.client.fetch_bundle(&address)?
+    };
+    let fetched = RelayClient::decode_bundle(&relay_bundle)?;
+    if fetched.address() != peer.address() || fetched.identity_key()? != peer.identity_key()? {
+        bail!("relay peer bundle does not match the locally verified identity");
+    }
+    Ok(fetched)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn send_envelope(
     paths: &ProfilePaths,
     password: &str,
@@ -744,19 +1019,42 @@ fn send_envelope(
     message_id: MessageId,
     plaintext: &[u8],
     envelope: &[u8],
+    relay: Option<&mut RelayRuntime>,
 ) -> Result<()> {
     let ciphertext = TextTransport.encode(envelope).trim().to_owned();
+    let sent_via_relay = relay.is_some();
+    if let Some(runtime) = relay {
+        let recipient = runtime
+            .peer_ids
+            .get(&peer.name)
+            .cloned()
+            .unwrap_or_else(|| peer.address().to_string());
+        runtime
+            .client
+            .send_message(&recipient, &message_id.encode(), envelope, None)?;
+    }
+    let timestamp = now();
+    let text = String::from_utf8_lossy(plaintext).into_owned();
     history.entries.push(HistoryEntry {
-        timestamp: now(),
+        timestamp,
         sender: "you".to_owned(),
-        text: String::from_utf8_lossy(plaintext).into_owned(),
+        text: text.clone(),
         message_id: message_id.encode(),
         peer: peer.address().to_string(),
         ciphertext: ciphertext.clone(),
+        delivery_status: if sent_via_relay {
+            "sent".to_owned()
+        } else {
+            String::new()
+        },
     });
     save_history(&paths.lobby_history(peer), password, history)?;
-    println!("Copy and send this ciphertext:");
-    println!("{ciphertext}");
+    if sent_via_relay {
+        println!("  [{}] you: {} [sent]", format_timestamp(timestamp), text);
+    } else {
+        println!("Copy and send this ciphertext:");
+        println!("{ciphertext}");
+    }
     Ok(())
 }
 
@@ -766,7 +1064,15 @@ fn receive_message(
     history: &mut HistoryFile,
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
+    relay: Option<&mut RelayRuntime>,
 ) -> Result<()> {
+    if let Some(runtime) = relay {
+        let received = receive_relay(paths, password, history, state, peer, runtime)?;
+        if received == 0 {
+            println!("No new relay messages for {}.", peer.address());
+        }
+        return Ok(());
+    }
     let choices = ["Paste ciphertext", "Cancel"];
     let choice = Select::new()
         .with_prompt("Receive")
@@ -787,9 +1093,212 @@ fn receive_ciphertext(
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
     ciphertext: &str,
+    _relay: Option<&mut RelayRuntime>,
 ) -> Result<()> {
     let envelope = TextTransport.decode(ciphertext)?;
     receive_envelope(paths, password, history, state, peer, &envelope)
+}
+
+fn receive_relay(
+    paths: &ProfilePaths,
+    password: &str,
+    history: &mut HistoryFile,
+    state: &mut SqliteSignalState,
+    peer: &SignalPreKeyBundle,
+    runtime: &mut RelayRuntime,
+) -> Result<usize> {
+    let mut history_changed = false;
+    let mut activity = 0;
+    for entry in &mut history.entries {
+        if entry.sender == "you" && entry.delivery_status == "sent" && !entry.message_id.is_empty()
+        {
+            if let Ok(status) = runtime.client.message_status(&entry.message_id) {
+                if status.status == "read" {
+                    entry.delivery_status = "read".to_owned();
+                    history_changed = true;
+                    activity += 1;
+                    println!(
+                        "  [{}] you: {} [read]",
+                        format_timestamp(entry.timestamp),
+                        entry.text
+                    );
+                }
+            }
+        }
+    }
+    if history_changed {
+        save_history(&paths.lobby_history(peer), password, history)?;
+    }
+    let messages = runtime.client.receive_messages(0)?;
+    let peer_address = peer.address().to_string();
+    for message in messages {
+        let sender_matches_address =
+            message.sender_address.as_deref() == Some(peer_address.as_str());
+        let sender_matches_relay_id = runtime
+            .peer_ids
+            .get(&peer.name)
+            .is_some_and(|relay_id| relay_id == &message.sender);
+        if !sender_matches_address && !sender_matches_relay_id && message.sender != peer.name {
+            continue;
+        }
+        let envelope = URL_SAFE_NO_PAD
+            .decode(message.ciphertext.as_bytes())
+            .context("relay returned invalid ciphertext encoding")?;
+        let decoded = match futures_executor::block_on(
+            state.decrypt_message_from(&peer.address(), &envelope),
+        ) {
+            Ok(decoded) => decoded,
+            Err(error) if error.to_string().contains("old counter") => {
+                println!(
+                    "Discarding stale relay message {} after ratchet recovery: {error:#}",
+                    message.message_id
+                );
+                runtime.client.acknowledge(message.server_id)?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let message_id = decoded.id.encode();
+        if !history
+            .entries
+            .iter()
+            .any(|entry| entry.message_id == message_id)
+        {
+            let text = String::from_utf8(decoded.plaintext)
+                .context("decrypted relay message is not UTF-8 text")?;
+            let timestamp = now();
+            history.entries.push(HistoryEntry {
+                timestamp,
+                sender: peer.name.clone(),
+                text: text.clone(),
+                message_id,
+                peer: peer.address().to_string(),
+                ciphertext: TextTransport.encode(&envelope).trim().to_owned(),
+                delivery_status: "received".to_owned(),
+            });
+            save_history(&paths.lobby_history(peer), password, history)?;
+            println!("[{}] {}: {}", format_timestamp(timestamp), peer.name, text);
+            activity += 1;
+        }
+        runtime.client.acknowledge(message.server_id)?;
+    }
+    Ok(activity)
+}
+
+/// Read a relay-mode chat line while periodically checking for incoming mail.
+///
+/// `dialoguer::Input` is intentionally kept for the copy/paste workflow and
+/// for commands that need a secondary prompt. Relay mode gets a small terminal
+/// editor so the main thread can poll the relay without waiting for Enter.
+fn read_relay_input(
+    paths: &ProfilePaths,
+    password: &str,
+    history: &mut HistoryFile,
+    state: &mut SqliteSignalState,
+    peer: &SignalPreKeyBundle,
+    runtime: &mut RelayRuntime,
+) -> Result<String> {
+    let term = Term::stdout();
+    let _raw_mode = RawMode::new()?;
+    let mut line = String::new();
+    term.write_str("> ")?;
+    loop {
+        match read_relay_key(&term)? {
+            Some(Key::Char(character)) => {
+                line.push(character);
+                term.write_str(&character.to_string())?;
+            }
+            Some(Key::Backspace) => {
+                if line.pop().is_some() {
+                    term.write_str("\x08 \x08")?;
+                }
+            }
+            Some(Key::Enter) => {
+                term.write_line("")?;
+                return Ok(line);
+            }
+            Some(Key::CtrlC) => {
+                term.write_line("^C")?;
+                return Ok("/quit".to_owned());
+            }
+            Some(Key::Escape) => {
+                line.clear();
+                term.write_str("\r\x1b[2K> ")?;
+            }
+            Some(_) | None => {}
+        }
+
+        if receive_relay(paths, password, history, state, peer, runtime)? > 0 {
+            term.write_str(&format!("\r\x1b[2K> {line}"))?;
+        }
+    }
+}
+
+#[cfg(unix)]
+struct RawMode {
+    original: libc::termios,
+}
+
+#[cfg(unix)]
+impl RawMode {
+    fn new() -> Result<Self> {
+        let input = io::stdin();
+        let fd = input.as_raw_fd();
+        let mut original = std::mem::MaybeUninit::uninit();
+        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let original = unsafe { original.assume_init() };
+        let mut raw = original;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &raw) } != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(Self { original })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        let fd = io::stdin().as_raw_fd();
+        unsafe {
+            libc::tcsetattr(fd, libc::TCSADRAIN, &self.original);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct RawMode;
+
+#[cfg(not(unix))]
+impl RawMode {
+    fn new() -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+fn read_relay_key(term: &Term) -> Result<Option<Key>> {
+    #[cfg(unix)]
+    {
+        let mut descriptor = libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut descriptor, 1, 500) };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if result == 0 {
+            return Ok(None);
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = term;
+
+    Ok(Some(term.read_key()?))
 }
 
 fn receive_envelope(
@@ -813,16 +1322,18 @@ fn receive_envelope(
     }
     let text =
         String::from_utf8(message.plaintext).context("decrypted message is not UTF-8 text")?;
+    let timestamp = now();
     history.entries.push(HistoryEntry {
-        timestamp: now(),
+        timestamp,
         sender: peer.name.clone(),
         text: text.clone(),
         message_id,
         peer: peer.address().to_string(),
         ciphertext: TextTransport.encode(envelope).trim().to_owned(),
+        delivery_status: "received".to_owned(),
     });
     save_history(&paths.lobby_history(peer), password, history)?;
-    println!("{}: {}", peer.name, text);
+    println!("[{}] {}: {}", format_timestamp(timestamp), peer.name, text);
     Ok(())
 }
 
@@ -840,18 +1351,38 @@ fn show_history(history: &HistoryFile, view: HistoryView) {
     }
     println!("Chat history:");
     for entry in &history.entries {
-        let timestamp = DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0).map_or_else(
-            || "unknown time".to_owned(),
-            |date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        );
+        let timestamp = format_timestamp(entry.timestamp);
+        let indent = if entry.sender == "you" { "  " } else { "" };
+        let status = match entry.delivery_status.as_str() {
+            "sent" => " [sent]",
+            "delivered" => " [delivered]",
+            "read" => " [read]",
+            "failed" => " [failed]",
+            _ => "",
+        };
         match view {
             HistoryView::Ciphertext => {
-                println!("[{timestamp}] {}: {}", entry.sender, entry.ciphertext)
+                println!(
+                    "{indent}[{timestamp}] {}: {}{}",
+                    entry.sender, entry.ciphertext, status
+                )
             }
-            HistoryView::Clean => println!("[{timestamp}] {}: {}", entry.sender, entry.text),
+            HistoryView::Clean => {
+                println!(
+                    "{indent}[{timestamp}] {}: {}{}",
+                    entry.sender, entry.text, status
+                )
+            }
         }
     }
     println!();
+}
+
+fn format_timestamp(timestamp: u64) -> String {
+    DateTime::<Utc>::from_timestamp(timestamp as i64, 0).map_or_else(
+        || "unknown time".to_owned(),
+        |date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    )
 }
 
 fn load_history(path: &Path, password: &str) -> Result<HistoryFile> {
@@ -875,12 +1406,79 @@ fn load_history(path: &Path, password: &str) -> Result<HistoryFile> {
     Ok(history)
 }
 
+fn load_relay_token(path: &Path, password: &str) -> Result<String> {
+    let input = File::open(path)?;
+    let decryptor = Decryptor::new(input)?;
+    let secret = age::secrecy::SecretString::from(password.to_owned());
+    let identity = age::scrypt::Identity::new(secret);
+    let mut reader = decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity))?;
+    let mut token = String::new();
+    reader.read_to_string(&mut token)?;
+    if token.trim().is_empty() {
+        bail!("saved relay session is empty");
+    }
+    Ok(token.trim().to_owned())
+}
+
+fn save_relay_token(path: &Path, password: &str, token: &str) -> Result<()> {
+    let temporary = path.with_extension("age.tmp");
+    remove_stale_temporary(&temporary)?;
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    let secret = age::secrecy::SecretString::from(password.to_owned());
+    let encryptor = Encryptor::with_user_passphrase(secret);
+    let mut writer = encryptor.wrap_output(file)?;
+    writer.write_all(token.as_bytes())?;
+    writer.finish()?;
+    fs::rename(temporary, path)?;
+    restrict_file(path)?;
+    Ok(())
+}
+
+fn load_relay_peer_ids(path: &Path, password: &str) -> Result<HashMap<String, String>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let input = File::open(path)?;
+    let decryptor = Decryptor::new(input)?;
+    let secret = age::secrecy::SecretString::from(password.to_owned());
+    let identity = age::scrypt::Identity::new(secret);
+    let mut reader = decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity))?;
+    let mut plaintext = Vec::new();
+    reader.read_to_end(&mut plaintext)?;
+    Ok(serde_json::from_slice(&plaintext)?)
+}
+
+fn save_relay_peer_ids(
+    path: &Path,
+    password: &str,
+    peer_ids: &HashMap<String, String>,
+) -> Result<()> {
+    let temporary = path.with_extension("age.tmp");
+    remove_stale_temporary(&temporary)?;
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    let secret = age::secrecy::SecretString::from(password.to_owned());
+    let encryptor = Encryptor::with_user_passphrase(secret);
+    let mut writer = encryptor.wrap_output(file)?;
+    writer.write_all(&serde_json::to_vec(peer_ids)?)?;
+    writer.finish()?;
+    fs::rename(temporary, path)?;
+    restrict_file(path)?;
+    Ok(())
+}
+
 fn save_history(path: &Path, password: &str, history: &HistoryFile) -> Result<()> {
     let parent = path
         .parent()
         .context("chat history has no parent directory")?;
     fs::create_dir_all(parent)?;
     let temporary = path.with_extension("age.tmp");
+    remove_stale_temporary(&temporary)?;
     let file = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -893,6 +1491,14 @@ fn save_history(path: &Path, password: &str, history: &HistoryFile) -> Result<()
     writer.finish()?;
     fs::rename(temporary, path)?;
     Ok(())
+}
+
+fn remove_stale_temporary(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -924,6 +1530,7 @@ mod tests {
                 message_id: "".to_owned(),
                 peer: "alice".to_owned(),
                 ciphertext: "safechat-text-v1:test".to_owned(),
+                delivery_status: String::new(),
             }],
         };
         save_history(&path, "correct password", &history).unwrap();
