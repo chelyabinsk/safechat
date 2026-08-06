@@ -20,7 +20,7 @@ RUN apt-get update \
     && usermod --append --groups sudo "${USERNAME}" \
     && printf '%s ALL=(root) NOPASSWD:ALL\n' "${USERNAME}" > "/etc/sudoers.d/${USERNAME}" \
     && chmod 0440 "/etc/sudoers.d/${USERNAME}" \
-    && mkdir -p /workspace /usr/local/cargo \
+    && mkdir -p /workspace /usr/local/cargo/registry /usr/local/cargo/git \
     && chown -R "${USER_UID}:${USER_GID}" /workspace /usr/local/cargo
 
 RUN rustup component add rustfmt clippy

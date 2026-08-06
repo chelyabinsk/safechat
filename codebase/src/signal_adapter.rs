@@ -16,6 +16,7 @@ use signal_protocol::{
     process_prekey_bundle,
 };
 use signal_rand::{CryptoRng, Rng, TryRngCore};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -24,6 +25,9 @@ const ENVELOPE_HEADER_LEN: usize = ENVELOPE_MAGIC.len() + 1 + 4;
 const MAX_CIPHERTEXT_LEN: usize = 16 * 1024 * 1024;
 const BUNDLE_MAGIC: &[u8] = b"safechat-signal-bundle-v1\0";
 const MAX_BUNDLE_FIELD_LEN: usize = 16 * 1024;
+const PREKEY_LOW_WATERMARK: usize = 8;
+const PREKEY_TARGET: usize = 32;
+const SIGNED_PREKEY_ROTATION_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Exact upstream revision used by this workspace.
 pub const LIBSIGNAL_REVISION: &str = "b5121d07c72f9e631f178d907ca892587f64f9e2";
@@ -292,10 +296,14 @@ pub struct SqliteSignalState {
 
 impl SqliteSignalState {
     /// Open or create a device database, preserving its identity across restarts.
-    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub async fn open(path: impl AsRef<Path>, password: &str) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        reject_plaintext_database(&path)?;
         let db = Connection::open(&path)
             .with_context(|| format!("opening Signal database {}", path.display()))?;
+        db.pragma_update(None, "key", password)
+            .context("unlocking encrypted Signal database")?;
+        db.execute_batch("PRAGMA synchronous = FULL;")?;
         db.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS signal_meta (
@@ -332,8 +340,14 @@ impl SqliteSignalState {
                  id INTEGER PRIMARY KEY,
                  record BLOB NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS signal_key_lifecycle (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 signed_prekey_created_at INTEGER NOT NULL
+             );
              INSERT INTO signal_meta(id, schema_version) VALUES (1, 1)
-                 ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version;",
+                 ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version;
+             INSERT INTO signal_key_lifecycle(id, signed_prekey_created_at) VALUES (1, 0)
+                 ON CONFLICT(id) DO NOTHING;",
         )?;
 
         let identity = db
@@ -390,8 +404,13 @@ impl SqliteSignalState {
     }
 
     /// Create or validate the local user identity and device address.
-    pub async fn initialize(path: impl AsRef<Path>, name: &str, device_id: u8) -> Result<Self> {
-        let mut state = Self::open(path).await?;
+    pub async fn initialize(
+        path: impl AsRef<Path>,
+        name: &str,
+        device_id: u8,
+        password: &str,
+    ) -> Result<Self> {
+        let mut state = Self::open(path, password).await?;
         let device =
             DeviceId::new(device_id).map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let existing = state
@@ -453,20 +472,108 @@ impl SqliteSignalState {
     }
 
     pub async fn export_bundle(&mut self) -> Result<SignalPreKeyBundle> {
-        let mut rng = signal_rand::rngs::OsRng.unwrap_err();
-        if self.store.all_pre_key_ids().next().is_none()
-            || self.store.all_signed_pre_key_ids().next().is_none()
-            || self.store.all_kyber_pre_key_ids().next().is_none()
-        {
-            create_prekey_bundle(&mut self.store, &mut rng).await?;
-            let local = self.local_address.clone();
-            self.persist_peer(&local).await?;
-        }
+        self.maintain_key_inventory().await?;
         Ok(SignalPreKeyBundle {
             name: self.local_address.name().to_owned(),
             device_id: self.local_address.device_id(),
             bundle: bundle_from_store(&self.store, self.local_address.device_id()).await?,
         })
+    }
+
+    /// Maintain local prekeys without requiring the caller to manage bundles.
+    /// This is safe to call before sending and after receiving messages.
+    pub async fn maintain_key_inventory(&mut self) -> Result<()> {
+        let mut rng = signal_rand::rngs::OsRng.unwrap_err();
+        let (changed, rotated_at) = self.ensure_key_inventory(&mut rng).await?;
+        if !changed {
+            return Ok(());
+        }
+        let local = self.local_address.clone();
+        self.persist_peer(&local).await?;
+        if let Some(created_at) = rotated_at {
+            self.db.execute(
+                "UPDATE signal_key_lifecycle SET signed_prekey_created_at = ?1 WHERE id = 1",
+                params![created_at],
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_key_inventory<R: Rng + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(bool, Option<u64>)> {
+        let mut changed = false;
+        if self.store.all_signed_pre_key_ids().next().is_none()
+            || self.store.all_kyber_pre_key_ids().next().is_none()
+        {
+            create_prekey_bundle(&mut self.store, rng).await?;
+            changed = true;
+        }
+
+        let prekey_count = self.store.all_pre_key_ids().count();
+        if prekey_count < PREKEY_LOW_WATERMARK {
+            let mut next_id = self
+                .store
+                .all_pre_key_ids()
+                .map(|id| u32::from(*id))
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            while self.store.all_pre_key_ids().count() < PREKEY_TARGET {
+                let id: PreKeyId = next_id.into();
+                let pair = KeyPair::generate(rng);
+                self.store
+                    .pre_key_store
+                    .save_pre_key(id, &PreKeyRecord::new(id, &pair))
+                    .await?;
+                changed = true;
+                next_id = next_id.saturating_add(1);
+            }
+        }
+
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .as_secs();
+        let created_at: u64 = self
+            .db
+            .query_row(
+                "SELECT signed_prekey_created_at FROM signal_key_lifecycle WHERE id = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|value| value.max(0) as u64)?;
+        if now.saturating_sub(created_at) < SIGNED_PREKEY_ROTATION_SECS {
+            return Ok((changed, None));
+        }
+
+        let next_id: SignedPreKeyId = self
+            .store
+            .all_signed_pre_key_ids()
+            .map(|id| u32::from(*id))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .into();
+        let pair = KeyPair::generate(rng);
+        let identity = self.store.identity_store.get_identity_key_pair().await?;
+        let signature = identity
+            .private_key()
+            .calculate_signature(&pair.public_key.serialize(), rng)?;
+        self.store
+            .signed_pre_key_store
+            .save_signed_pre_key(
+                next_id,
+                &SignedPreKeyRecord::new(
+                    next_id,
+                    Timestamp::from_epoch_millis(now.saturating_mul(1000)),
+                    &pair,
+                    &signature,
+                ),
+            )
+            .await?;
+        Ok((true, Some(now)))
     }
 
     pub async fn trust_bundle(&mut self, bundle: &SignalPreKeyBundle) -> Result<()> {
@@ -485,6 +592,7 @@ impl SqliteSignalState {
         if local.name() == "unconfigured" {
             bail!("database must be initialized before encryption");
         }
+        self.maintain_key_inventory().await?;
         self.load_peer(&peer).await?;
         let expected = bundle.identity_key()?;
         if self.trusted_identity(&peer).await? != Some(expected) {
@@ -550,6 +658,7 @@ impl SqliteSignalState {
             &mut rng,
         )
         .await?;
+        self.maintain_key_inventory().await?;
         self.persist_peer(sender).await?;
         Ok(plaintext)
     }
@@ -738,6 +847,23 @@ impl SqliteSignalState {
     }
 }
 
+fn reject_plaintext_database(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("reading Signal database header {}", path.display()))?;
+    let mut header = [0u8; 16];
+    let bytes_read = file.read(&mut header)?;
+    if bytes_read == header.len() && &header == b"SQLite format 3\0" {
+        bail!(
+            "Signal database {} is an unencrypted legacy SQLite database; migrate it before use",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Run a real libsignal X3DH/Double-Ratchet exchange between two SQLite-backed
 /// clients, including a restart between messages.
 pub fn run_signal_demo() -> Result<Vec<u8>> {
@@ -755,8 +881,8 @@ pub fn run_signal_demo() -> Result<Vec<u8>> {
         let bob_path = base.with_extension("bob.db");
         let _ = std::fs::remove_file(&alice_path);
         let _ = std::fs::remove_file(&bob_path);
-        let mut alice = SqliteSignalState::open(&alice_path).await?;
-        let mut bob = SqliteSignalState::open(&bob_path).await?;
+        let mut alice = SqliteSignalState::open(&alice_path, "demo-password").await?;
+        let mut bob = SqliteSignalState::open(&bob_path, "demo-password").await?;
         let bundle = create_prekey_bundle(&mut bob.store, &mut rng).await?;
         bob.persist_peer(&alice_address).await?;
         alice.load_peer(&bob_address).await?;
@@ -804,8 +930,8 @@ pub fn run_signal_demo() -> Result<Vec<u8>> {
         // Reopen both databases and prove the ratchet/session state survives.
         drop(alice);
         drop(bob);
-        let mut alice = SqliteSignalState::open(&alice_path).await?;
-        let mut bob = SqliteSignalState::open(&bob_path).await?;
+        let mut alice = SqliteSignalState::open(&alice_path, "demo-password").await?;
+        let mut bob = SqliteSignalState::open(&bob_path, "demo-password").await?;
         alice.load_peer(&bob_address).await?;
         bob.load_peer(&alice_address).await?;
         let outgoing = message_encrypt(
@@ -906,11 +1032,11 @@ async fn bundle_from_store(
         .context("no one-time prekey available")?;
     let signed_pre_key_id = *store
         .all_signed_pre_key_ids()
-        .next()
+        .max()
         .context("no signed prekey available")?;
     let kyber_pre_key_id = *store
         .all_kyber_pre_key_ids()
-        .next()
+        .max()
         .context("no Kyber prekey available")?;
     let pre_key = store.pre_key_store.get_pre_key(pre_key_id).await?;
     let signed_pre_key = store
@@ -973,5 +1099,51 @@ mod tests {
             ciphertext: vec![],
         };
         assert!(invalid.encode().is_err());
+    }
+
+    #[test]
+    fn sqlite_database_requires_password_and_is_not_plaintext() {
+        let path = std::env::temp_dir().join(format!(
+            "safechat-encrypted-db-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        futures_executor::block_on(async {
+            let state = SqliteSignalState::open(&path, "correct password")
+                .await
+                .unwrap();
+            drop(state);
+            assert!(
+                SqliteSignalState::open(&path, "wrong password")
+                    .await
+                    .is_err()
+            );
+        });
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!bytes.starts_with(b"SQLite format 3\0"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn exporting_bundle_replenishes_one_time_prekeys() {
+        let path = std::env::temp_dir().join(format!(
+            "safechat-prekey-inventory-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        futures_executor::block_on(async {
+            let mut state = SqliteSignalState::initialize(&path, "alice", 1, "correct password")
+                .await
+                .unwrap();
+            state.export_bundle().await.unwrap();
+            assert!(state.store.all_pre_key_ids().count() >= PREKEY_TARGET);
+        });
+        std::fs::remove_file(path).unwrap();
     }
 }

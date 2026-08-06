@@ -6,6 +6,7 @@ use directories::ProjectDirs;
 use safechat::signal_adapter::{SignalPreKeyBundle, SqliteSignalState, identity_fingerprint};
 use safechat::transport::{BundleTransport, TextTransport};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -29,22 +30,23 @@ struct ProfilePaths {
     root: PathBuf,
     database: PathBuf,
     history: PathBuf,
-    outbox: PathBuf,
-    inbox: PathBuf,
+    lobby_histories: PathBuf,
     peers: PathBuf,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct HistoryFile {
     version: u32,
     entries: Vec<HistoryEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct HistoryEntry {
     timestamp: u64,
     sender: String,
     text: String,
+    #[serde(default)]
+    peer: String,
     #[serde(default)]
     ciphertext: String,
 }
@@ -60,31 +62,57 @@ fn main() -> Result<()> {
     let paths = ProfilePaths::new(cli.data_dir, &cli.profile)?;
     paths.create()?;
     let password = unlock_password(&paths.history)?;
-    let mut history = load_history(&paths.history, &password)?;
-    let mut state = futures_executor::block_on(open_or_initialize(&paths))?;
+    let mut state = futures_executor::block_on(open_or_initialize(&paths, &password))?;
     restrict_file(&paths.database)?;
+    // Refresh the local prekey inventory and rotate lifecycle keys before
+    // loading the private lobbies.
+    futures_executor::block_on(state.export_bundle())?;
 
-    let mut peer = if paths.peer_bundle().exists() {
-        Some(load_bundle(&paths.peer_bundle())?)
-    } else {
-        None
-    };
-
-    if peer.is_none() {
+    let mut peers = load_peers(&paths.peers)?;
+    if peers.is_empty() {
         println!("No conversation is configured yet.");
         println!("We will create your identity and guide you through setup.");
-        peer = Some(futures_executor::block_on(setup_peer(&paths, &mut state))?);
+        peers.push(futures_executor::block_on(setup_peer(&paths, &mut state))?);
     }
 
+    let legacy_history = paths
+        .history
+        .exists()
+        .then(|| load_history(&paths.history, &password))
+        .transpose()?;
+    let mut histories = peers
+        .iter()
+        .enumerate()
+        .map(|(index, peer)| {
+            let path = paths.lobby_history(peer);
+            if path.exists() {
+                load_history(&path, &password)
+            } else if let Some(legacy) = &legacy_history {
+                Ok(HistoryFile {
+                    version: PROFILE_VERSION,
+                    entries: legacy
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            (index == 0 && entry.peer.is_empty())
+                                || entry.peer == peer.name
+                                || entry.peer == peer.address().to_string()
+                        })
+                        .cloned()
+                        .collect(),
+                })
+            } else {
+                Ok(HistoryFile {
+                    version: PROFILE_VERSION,
+                    entries: Vec::new(),
+                })
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     let view = choose_history_view()?;
-    show_history(&history, view);
-    chat_loop(
-        &paths,
-        &password,
-        &mut history,
-        &mut state,
-        peer.expect("peer configured"),
-    )
+    show_history(&histories[0], view);
+    chat_loop(&paths, &password, &mut histories, &mut state, peers)
 }
 
 impl ProfilePaths {
@@ -102,8 +130,7 @@ impl ProfilePaths {
             root: root.clone(),
             database: root.join("identity.db"),
             history: root.join("chat-history.age"),
-            outbox: root.join("outbox"),
-            inbox: root.join("inbox"),
+            lobby_histories: root.join("lobbies"),
             peers: root.join("peers"),
         })
     }
@@ -111,17 +138,16 @@ impl ProfilePaths {
     fn create(&self) -> Result<()> {
         fs::create_dir_all(&self.root)?;
         restrict_directory(&self.root)?;
-        fs::create_dir_all(&self.outbox)?;
-        fs::create_dir_all(&self.inbox)?;
+        fs::create_dir_all(&self.lobby_histories)?;
         fs::create_dir_all(&self.peers)?;
-        restrict_directory(&self.outbox)?;
-        restrict_directory(&self.inbox)?;
+        restrict_directory(&self.lobby_histories)?;
         restrict_directory(&self.peers)?;
         Ok(())
     }
 
-    fn peer_bundle(&self) -> PathBuf {
-        self.peers.join("active.bundle.txt")
+    fn lobby_history(&self, peer: &SignalPreKeyBundle) -> PathBuf {
+        self.lobby_histories
+            .join(format!("{}.age", peer_file_component(peer)))
     }
 }
 
@@ -172,9 +198,9 @@ fn unlock_password(history_path: &Path) -> Result<String> {
     }
 }
 
-async fn open_or_initialize(paths: &ProfilePaths) -> Result<SqliteSignalState> {
+async fn open_or_initialize(paths: &ProfilePaths, password: &str) -> Result<SqliteSignalState> {
     if paths.database.exists() {
-        let state = SqliteSignalState::open(&paths.database).await?;
+        let state = SqliteSignalState::open(&paths.database, password).await?;
         if state.local_address().name() != "unconfigured" {
             return Ok(state);
         }
@@ -191,7 +217,7 @@ async fn open_or_initialize(paths: &ProfilePaths) -> Result<SqliteSignalState> {
     let name = Input::<String>::new()
         .with_prompt("Your display name")
         .interact_text()?;
-    let state = SqliteSignalState::initialize(&paths.database, &name, 1).await?;
+    let state = SqliteSignalState::initialize(&paths.database, &name, 1, password).await?;
     restrict_file(&paths.database)?;
     println!("Identity created.");
     println!(
@@ -206,18 +232,16 @@ async fn setup_peer(
     state: &mut SqliteSignalState,
 ) -> Result<SignalPreKeyBundle> {
     let own_bundle = state.export_bundle().await?;
-    let own_bundle_path = paths.outbox.join("my-bundle.txt");
-    write_bundle(&own_bundle_path, &own_bundle)?;
     println!();
-    println!("Send your public bundle to the other person:");
-    println!("  {}", own_bundle_path.display());
+    println!("Copy and send your public bundle to the other person:");
+    println!("{}", BundleTransport.encode(&own_bundle.encode()?));
     println!(
         "Your fingerprint: {}",
         identity_fingerprint(&own_bundle.identity_key()?)
     );
     println!("Verify the other person's fingerprint through your separate trusted channel.");
 
-    let bundle = read_bundle_prompt("Enter the other person's bundle path or paste its text")?;
+    let bundle = read_bundle_prompt("Paste the other person's bundle text")?;
     let actual = identity_fingerprint(&bundle.identity_key()?);
     println!("Received bundle for {}", bundle.address());
     println!("Fingerprint: {actual}");
@@ -228,9 +252,51 @@ async fn setup_peer(
         bail!("fingerprint does not match; the peer was not trusted");
     }
     state.trust_bundle(&bundle).await?;
-    write_bundle(&paths.peer_bundle(), &bundle)?;
+    let path = paths
+        .peers
+        .join(format!("{}.bundle", peer_file_component(&bundle)));
+    write_bundle(&path, &bundle)?;
     println!("Peer trusted. You can now exchange encrypted messages.");
     Ok(bundle)
+}
+
+fn load_peers(directory: &Path) -> Result<Vec<SignalPreKeyBundle>> {
+    let mut paths = fs::read_dir(directory)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "bundle")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    let loaded = paths
+        .into_iter()
+        .map(|path| load_bundle(&path))
+        .collect::<Result<Vec<_>>>()?;
+    let mut seen = HashSet::new();
+    Ok(loaded
+        .into_iter()
+        .rev()
+        .filter(|peer| seen.insert(peer.address().to_string()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect())
+}
+
+fn peer_file_component(bundle: &SignalPreKeyBundle) -> String {
+    bundle
+        .address()
+        .to_string()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn write_bundle(path: &Path, bundle: &SignalPreKeyBundle) -> Result<()> {
@@ -260,25 +326,19 @@ fn load_bundle(path: &Path) -> Result<SignalPreKeyBundle> {
 }
 
 fn read_bundle_prompt(prompt: &str) -> Result<SignalPreKeyBundle> {
-    let first = Input::<String>::new().with_prompt(prompt).interact_text()?;
-    let bytes = if Path::new(&first).is_file() {
-        let text = fs::read_to_string(&first)?;
-        BundleTransport.decode(&text)?
-    } else {
-        let mut text = first;
-        if !text.trim().starts_with("safechat-bundle-v1:") {
-            println!("Paste the bundle text, then enter END on its own line.");
-            loop {
-                let mut line = String::new();
-                io::stdin().read_line(&mut line)?;
-                if line.trim() == "END" {
-                    break;
-                }
-                text.push_str(&line);
+    let mut text = Input::<String>::new().with_prompt(prompt).interact_text()?;
+    if !text.trim().starts_with("safechat-bundle-v1:") {
+        println!("Paste the remaining bundle text, then enter END on its own line.");
+        loop {
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            if line.trim() == "END" {
+                break;
             }
+            text.push_str(&line);
         }
-        BundleTransport.decode(&text)?
-    };
+    }
+    let bytes = BundleTransport.decode(&text)?;
     SignalPreKeyBundle::decode(&bytes)
 }
 
@@ -307,12 +367,13 @@ fn choose_history_view() -> Result<HistoryView> {
 fn chat_loop(
     paths: &ProfilePaths,
     password: &str,
-    history: &mut HistoryFile,
+    histories: &mut Vec<HistoryFile>,
     state: &mut SqliteSignalState,
-    peer: SignalPreKeyBundle,
+    mut peers: Vec<SignalPreKeyBundle>,
 ) -> Result<()> {
+    let mut current = 0;
     println!();
-    println!("Conversation with {}", peer.address());
+    println!("Conversation with {}", peers[current].address());
     println!("Type /help for commands.");
     loop {
         let command = Input::<String>::new().with_prompt("> ").interact_text()?;
@@ -321,7 +382,14 @@ fn chat_loop(
             if message.trim().is_empty() {
                 println!("Usage: /s <plain text>");
             } else {
-                send_plaintext(paths, password, history, state, &peer, message.as_bytes())?;
+                send_plaintext(
+                    paths,
+                    password,
+                    &mut histories[current],
+                    state,
+                    &peers[current],
+                    message.as_bytes(),
+                )?;
             }
             continue;
         }
@@ -329,21 +397,76 @@ fn chat_loop(
             if ciphertext.trim().is_empty() {
                 println!("Usage: /r <ciphertext>");
             } else {
-                receive_ciphertext(paths, password, history, state, &peer, ciphertext)?;
+                receive_ciphertext(
+                    paths,
+                    password,
+                    &mut histories[current],
+                    state,
+                    &peers[current],
+                    ciphertext,
+                )?;
             }
             continue;
         }
         match command {
             "/help" => print_help(),
-            "/send" => send_message(paths, password, history, state, &peer)?,
-            "/receive" => receive_message(paths, password, history, state, &peer)?,
-            "/clean" => show_history(history, HistoryView::Clean),
-            "/cipher" => show_history(history, HistoryView::Ciphertext),
+            "/send" => send_message(
+                paths,
+                password,
+                &mut histories[current],
+                state,
+                &peers[current],
+            )?,
+            "/receive" => receive_message(
+                paths,
+                password,
+                &mut histories[current],
+                state,
+                &peers[current],
+            )?,
+            "/peers" => list_peers(&peers, current)?,
+            "/add-peer" => {
+                let peer = futures_executor::block_on(setup_peer(paths, state))?;
+                if let Some(index) = peers
+                    .iter()
+                    .position(|existing| existing.address() == peer.address())
+                {
+                    peers[index] = peer;
+                    current = index;
+                } else {
+                    let history_path = paths.lobby_history(&peer);
+                    let history = if history_path.exists() {
+                        load_history(&history_path, password)?
+                    } else {
+                        HistoryFile {
+                            version: PROFILE_VERSION,
+                            entries: Vec::new(),
+                        }
+                    };
+                    peers.push(peer);
+                    histories.push(history);
+                    current = peers.len() - 1;
+                }
+                println!("Active conversation: {}", peers[current].address());
+            }
+            command if command.starts_with("/use ") => {
+                let selector = command.trim_start_matches("/use ").trim();
+                if let Some(index) = peers.iter().position(|peer| {
+                    peer.name == selector || peer.address().to_string() == selector
+                }) {
+                    current = index;
+                    println!("Active conversation: {}", peers[current].address());
+                    show_history(&histories[current], HistoryView::Clean);
+                } else {
+                    println!("Unknown peer: {selector}. Use /peers to list peers.");
+                }
+            }
+            "/clean" => show_history(&histories[current], HistoryView::Clean),
+            "/cipher" => show_history(&histories[current], HistoryView::Ciphertext),
             "/bundle" => {
                 let bundle = futures_executor::block_on(state.export_bundle())?;
-                let path = paths.outbox.join("my-bundle.txt");
-                write_bundle(&path, &bundle)?;
-                println!("Updated public bundle written to {}", path.display());
+                println!("Copy and send this public bundle:");
+                println!("{}", BundleTransport.encode(&bundle.encode()?));
                 println!(
                     "Fingerprint: {}",
                     identity_fingerprint(&bundle.identity_key()?)
@@ -361,15 +484,32 @@ fn chat_loop(
 }
 
 fn print_help() {
-    println!("/s <text>  encrypt and print a message's ciphertext");
-    println!("/r <cipher> decrypt and print a ciphertext's message");
-    println!("/send      compose a message or choose a plaintext file");
-    println!("/receive   open a ciphertext file or paste ciphertext");
+    println!("/s <text>  encrypt and display a message's ciphertext");
+    println!("/r <cipher> decrypt a pasted ciphertext");
+    println!("/send      compose and encrypt a message");
+    println!("/receive   paste and decrypt ciphertext");
+    println!("/peers     list trusted peers and the active conversation");
+    println!("/use NAME  switch the active conversation");
+    println!("/add-peer  trust another participant's bundle");
     println!("/clean     show only the readable chat");
     println!("/cipher    show the copyable encrypted chat");
     println!("/bundle    export your current public bundle");
     println!("/fingerprint  show your identity fingerprint");
     println!("/quit      close the chat");
+}
+
+fn list_peers(peers: &[SignalPreKeyBundle], active: usize) -> Result<()> {
+    println!("Private lobbies:");
+    for (index, peer) in peers.iter().enumerate() {
+        let marker = if index == active { "*" } else { " " };
+        println!(
+            "{marker} {} ({})\nfingerprint: {}",
+            peer.name,
+            peer.address(),
+            identity_fingerprint(&peer.identity_key()?)
+        );
+    }
+    Ok(())
 }
 
 fn send_message(
@@ -379,7 +519,7 @@ fn send_message(
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
 ) -> Result<()> {
-    let choices = ["Type a message", "Read a plaintext file", "Cancel"];
+    let choices = ["Type a message", "Cancel"];
     let choice = Select::new()
         .with_prompt("Send")
         .items(&choices)
@@ -390,17 +530,10 @@ fn send_message(
             .with_prompt("Message")
             .interact_text()?
             .into_bytes(),
-        1 => {
-            let path = Input::<String>::new()
-                .with_prompt("Plaintext file")
-                .interact_text()?;
-            let path = PathBuf::from(path);
-            fs::read(&path).with_context(|| format!("reading plaintext file {}", path.display()))?
-        }
         _ => return Ok(()),
     };
     let envelope = futures_executor::block_on(state.encrypt_for(peer, &plaintext))?;
-    send_envelope(paths, password, history, &plaintext, &envelope)?;
+    send_envelope(paths, password, history, peer, &plaintext, &envelope)?;
     Ok(())
 }
 
@@ -413,30 +546,27 @@ fn send_plaintext(
     plaintext: &[u8],
 ) -> Result<()> {
     let envelope = futures_executor::block_on(state.encrypt_for(peer, plaintext))?;
-    send_envelope(paths, password, history, plaintext, &envelope)
+    send_envelope(paths, password, history, peer, plaintext, &envelope)
 }
 
 fn send_envelope(
     paths: &ProfilePaths,
     password: &str,
     history: &mut HistoryFile,
+    peer: &SignalPreKeyBundle,
     plaintext: &[u8],
     envelope: &[u8],
 ) -> Result<()> {
-    let path = paths
-        .outbox
-        .join(format!("message-{}.safechat", unique_id()));
     let ciphertext = TextTransport.encode(envelope).trim().to_owned();
-    fs::write(&path, &ciphertext)?;
     history.entries.push(HistoryEntry {
         timestamp: now(),
         sender: "you".to_owned(),
         text: String::from_utf8_lossy(plaintext).into_owned(),
+        peer: peer.address().to_string(),
         ciphertext: ciphertext.clone(),
     });
-    save_history(&paths.history, password, history)?;
-    println!("Encrypted message written to {}", path.display());
-    println!("Ciphertext to send:");
+    save_history(&paths.lobby_history(peer), password, history)?;
+    println!("Copy and send this ciphertext:");
     println!("{ciphertext}");
     Ok(())
 }
@@ -448,11 +578,7 @@ fn receive_message(
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
 ) -> Result<()> {
-    let choices = [
-        "Type or paste ciphertext",
-        "Open a ciphertext file",
-        "Cancel",
-    ];
+    let choices = ["Paste ciphertext", "Cancel"];
     let choice = Select::new()
         .with_prompt("Receive")
         .items(&choices)
@@ -460,13 +586,6 @@ fn receive_message(
         .interact()?;
     let envelope = match choice {
         0 => paste_ciphertext()?,
-        1 => {
-            let path = Input::<String>::new()
-                .with_prompt("Ciphertext file")
-                .interact_text()?;
-            let path = PathBuf::from(path);
-            read_ciphertext(&path)?
-        }
         _ => return Ok(()),
     };
     receive_envelope(paths, password, history, state, peer, &envelope)
@@ -498,23 +617,12 @@ fn receive_envelope(
         timestamp: now(),
         sender: peer.name.clone(),
         text: text.clone(),
+        peer: peer.address().to_string(),
         ciphertext: TextTransport.encode(envelope).trim().to_owned(),
     });
-    save_history(&paths.history, password, history)?;
+    save_history(&paths.lobby_history(peer), password, history)?;
     println!("{}: {}", peer.name, text);
     Ok(())
-}
-
-fn read_ciphertext(path: &Path) -> Result<Vec<u8>> {
-    let bytes = fs::read(path).with_context(|| format!("reading ciphertext {}", path.display()))?;
-    if let Ok(text) = std::str::from_utf8(&bytes)
-        && text
-            .trim_start()
-            .starts_with(safechat::transport::TEXT_HEADER)
-    {
-        return TextTransport.decode(text);
-    }
-    Ok(bytes)
 }
 
 fn paste_ciphertext() -> Result<Vec<u8>> {
@@ -586,6 +694,7 @@ fn save_history(path: &Path, password: &str, history: &HistoryFile) -> Result<()
     Ok(())
 }
 
+#[cfg(test)]
 fn unique_id() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -611,6 +720,7 @@ mod tests {
                 timestamp: 1,
                 sender: "alice".to_owned(),
                 text: "private message".to_owned(),
+                peer: "alice".to_owned(),
                 ciphertext: "safechat-text-v1:test".to_owned(),
             }],
         };

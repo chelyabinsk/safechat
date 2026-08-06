@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use dialoguer::Password;
 use png::{ColorType, Decoder, Transformations};
 use std::{fs, path::PathBuf};
 
@@ -163,9 +164,11 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
                 user,
                 device_id,
             } => {
-                let state =
-                    signal_adapter::SqliteSignalState::initialize(&database, &user, device_id)
-                        .await?;
+                let password = database_password()?;
+                let state = signal_adapter::SqliteSignalState::initialize(
+                    &database, &user, device_id, &password,
+                )
+                .await?;
                 println!("initialized {}", database.display());
                 println!(
                     "identity fingerprint: {}",
@@ -177,7 +180,9 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
                 output,
                 base64,
             } => {
-                let mut state = signal_adapter::SqliteSignalState::open(&database).await?;
+                let password = database_password()?;
+                let mut state =
+                    signal_adapter::SqliteSignalState::open(&database, &password).await?;
                 let bundle = state.export_bundle().await?;
                 let encoded = bundle.encode()?;
                 let output_bytes = if base64 {
@@ -203,6 +208,7 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
                 fingerprint,
                 base64,
             } => {
+                let password = database_password()?;
                 let bundle_bytes = fs::read(&bundle).context("reading Signal bundle")?;
                 let bundle_bytes = if base64 {
                     BundleTransport.decode(
@@ -217,7 +223,8 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
                 if actual != fingerprint {
                     bail!("bundle fingerprint does not match the verified fingerprint");
                 }
-                let mut state = signal_adapter::SqliteSignalState::open(&database).await?;
+                let mut state =
+                    signal_adapter::SqliteSignalState::open(&database, &password).await?;
                 state.trust_bundle(&bundle).await?;
                 println!("trusted {}", bundle.address());
             }
@@ -228,11 +235,13 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
                 output,
                 base64,
             } => {
+                let password = database_password()?;
                 let bundle =
                     signal_adapter::SignalPreKeyBundle::decode(&read_bundle_bytes(&bundle)?)?;
                 let plaintext = fs::read(&input)
                     .with_context(|| format!("reading input {}", input.display()))?;
-                let mut state = signal_adapter::SqliteSignalState::open(&database).await?;
+                let mut state =
+                    signal_adapter::SqliteSignalState::open(&database, &password).await?;
                 let envelope = state.encrypt_for(&bundle, &plaintext).await?;
                 let output_bytes = if base64 {
                     TextTransport.encode(&envelope).into_bytes()
@@ -251,6 +260,7 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
                 output,
                 base64,
             } => {
+                let password = database_password()?;
                 let device = signal_protocol::DeviceId::new(sender_device_id)
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
                 let sender_address = signal_protocol::ProtocolAddress::new(sender, device);
@@ -264,7 +274,8 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
                 } else {
                     input_bytes
                 };
-                let mut state = signal_adapter::SqliteSignalState::open(&database).await?;
+                let mut state =
+                    signal_adapter::SqliteSignalState::open(&database, &password).await?;
                 let plaintext = state.decrypt_from(&sender_address, &envelope).await?;
                 fs::write(&output, plaintext)
                     .with_context(|| format!("writing plaintext output {}", output.display()))?;
@@ -273,6 +284,13 @@ fn run_signal_command(command: SignalCommand) -> Result<()> {
         }
         Ok(())
     })
+}
+
+fn database_password() -> Result<String> {
+    Password::new()
+        .with_prompt("Signal database password")
+        .interact()
+        .context("reading database password")
 }
 
 fn read_png(path: &PathBuf) -> Result<RgbaImage> {

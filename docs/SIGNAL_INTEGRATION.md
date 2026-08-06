@@ -31,7 +31,12 @@ The adapter exposes SafeChat-owned request, session, and ciphertext types. It ow
 
 The current branch has linked and compiled the pinned upstream implementation. The
 Signal adapter initializes identities, prekeys, sessions, and encryption/decryption
-through libsignal, with SQLite persistence around the official reference stores.
+through libsignal, with SQLCipher-encrypted SQLite persistence around the official
+reference stores. The profile password is required to unlock the database.
+Bundle export, UI startup, sending, and receiving maintain a 32-entry
+one-time-prekey target below an 8-entry low-watermark and rotate signed
+prekeys after 30 days. Rotation retains old records for compatibility;
+bounded retirement and operational monitoring remain production work.
 The former custom handshake, session, ratchet, and envelope commands have been
 removed from the production binary.
 
@@ -40,15 +45,18 @@ removed from the production binary.
 The MVP currently has the cryptographic building blocks but not the complete
 operational key lifecycle. Before production deployment, implement and test:
 
-- automatic one-time prekey replenishment using a configurable low-watermark;
-- periodic signed-prekey rotation with a bounded overlap window for delayed
+- monitoring and explicit diagnostics when the one-time-prekey inventory is
+  low, signed-prekeys are stale, or rotation cannot be completed;
+- bounded retirement/overlap policy for rotated signed-prekeys and delayed
   messages;
 - monitoring and explicit diagnostics when prekeys are depleted or stale;
 - identity-key replacement, device revocation, and session invalidation after
   suspected compromise;
 - an out-of-band recovery flow that publishes the new fingerprint and requires
   peer re-verification;
-- crash-safe, transactional persistence for prekey consumption and rotation.
+- crash-injection validation of transactional persistence for prekey
+  consumption, ratchet updates, and rotation.
+- a documented migration path for existing plaintext identity databases.
 
 Until these are complete, existing sessions remain usable, but new
 asynchronous sessions and compromise recovery require manual operational

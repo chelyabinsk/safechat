@@ -17,6 +17,12 @@ docker compose build rust-dev
 docker compose run --rm rust-dev cargo run --locked -- signal-demo
 ```
 
+The Compose setup persists Cargo's registry and Git caches in named Docker
+volumes, so Rust crates and the pinned libsignal source are fetched only on the
+first build. Keep using the commands below; the caches survive `--rm`
+containers and image rebuilds. Cargo may still check the crates.io index, but it
+does not redownload already cached dependencies.
+
 The demo creates two SQLite-backed local devices, initializes a session from a
 prekey bundle, encrypts/decrypts messages through libsignal, and verifies that
 the session survives a restart.
@@ -35,77 +41,6 @@ docker compose run --rm rust-dev cargo build --release --locked
 ./codebase/target/release/safechat --help
 ```
 
-## Two-user Signal example
-
-The lifecycle is: initialize each local device once, export Bob's public
-bundle, verify/trust Bob's fingerprint on Alice, then encrypt and decrypt
-messages using the persistent databases.
-
-Initialize Alice and Bob:
-
-```sh
-docker compose run --rm rust-dev cargo run --locked -- signal init \
-  --database /workspace/alice.db --user alice
-docker compose run --rm rust-dev cargo run --locked -- signal init \
-  --database /workspace/bob.db --user bob
-```
-
-Export Bob's bundle and note the printed fingerprint:
-
-```sh
-docker compose run --rm rust-dev cargo run --locked -- signal bundle \
-  --database /workspace/bob.db --output /workspace/bob.bundle
-```
-
-For a text-only channel, add `--base64` to `signal bundle` and `signal trust`.
-The output is prefixed with `safechat-bundle-v1:` and remains a public bundle;
-verify its fingerprint through the separate trusted channel before trusting it.
-
-Alice also exports her bundle so Bob can verify Alice before accepting her
-messages:
-
-```sh
-docker compose run --rm rust-dev cargo run --locked -- signal bundle \
-  --database /workspace/alice.db --output /workspace/alice.bundle
-```
-
-On Alice's device, trust that bundle only after comparing its fingerprint
-through the separate trusted channel:
-
-```sh
-docker compose run --rm rust-dev cargo run --locked -- signal trust \
-  --database /workspace/alice.db --bundle /workspace/bob.bundle \
-  --fingerprint <verified-bob-fingerprint>
-```
-
-On Bob's device, verify Alice's printed fingerprint through the same trusted
-channel and trust Alice's bundle:
-
-```sh
-docker compose run --rm rust-dev cargo run --locked -- signal trust \
-  --database /workspace/bob.db --bundle /workspace/alice.bundle \
-  --fingerprint <verified-alice-fingerprint>
-```
-
-Alice can now send Bob a message:
-
-```sh
-docker compose run --rm rust-dev cargo run --locked -- signal encrypt \
-  --database /workspace/alice.db --bundle /workspace/bob.bundle \
-  --input /workspace/alice.txt --output /workspace/message.ciphertext
-```
-
-Bob decrypts it:
-
-```sh
-docker compose run --rm rust-dev cargo run --locked -- signal decrypt \
-  --database /workspace/bob.db --sender alice \
-  --input /workspace/message.ciphertext --output /workspace/bob.txt
-```
-
-The database files preserve identity, trust, prekeys, and session state.
-Repeat only `signal encrypt` and `signal decrypt` for subsequent messages.
-
 ## Friendly manual-chat UI
 
 Build and run the separate interactive UI:
@@ -114,19 +49,25 @@ Build and run the separate interactive UI:
 docker compose run --rm rust-dev cargo run --locked --bin safechat-ui
 ```
 
-It guides first-time setup, writes public bundles and outgoing ciphertext to
-the profile's `outbox/` directory, accepts incoming ciphertext from a file or
-paste, and displays chat history after unlocking it with the profile password.
+It guides first-time setup, displays public bundles and outgoing ciphertext in
+the UI for copy/paste, and unlocks both the encrypted chat history and the
+SQLCipher-encrypted Signal identity database with the profile password.
+Communication does not use plaintext, bundle, or ciphertext files. Each
+trusted participant is an independent private lobby with its own pairwise
+Signal session and encrypted history.
 At login, the first option shows copyable encrypted chat (ciphertext); the
 second shows clean, readable chat. Both views include UTC timestamps. During
 a session, `/cipher` switches to ciphertext history and `/clean` switches to
 the readable history. The profile uses the platform application-data
 directory; use `--profile NAME` to keep identities separate.
 
-After `/send`, the complete ciphertext is printed in the terminal as well as
-saved in `outbox/`. To receive a message, choose `Type or paste ciphertext`
-first and press Enter after pasting the single-line ciphertext. File input is
-the second option.
+After `/send`, copy the complete ciphertext shown in the UI and send it through
+your separate channel. Use `/receive` and choose `Paste ciphertext` to receive
+one. `/bundle` similarly displays the current public bundle for copy/paste.
+
+Use `/add-peer` to create another private lobby, `/peers` to list participants,
+and `/use NAME` to switch the active lobby. Messages are sent only to the
+currently selected peer.
 
 For quick manual chat, use the shortcuts directly at the prompt:
 
@@ -139,9 +80,12 @@ For quick manual chat, use the shortcuts directly at the prompt:
 
 The release archives contain both `safechat` and `safechat-ui` binaries.
 
-For text-only transports, add `--base64` to both commands. This wraps the
-binary Signal envelope in URL-safe Base64; it does not replace encryption or
-authentication. Without the flag, ciphertext files are binary.
+The low-level `safechat signal ...` commands also prompt for the encrypted
+database password. Existing plaintext `identity.db` files are rejected and
+must be migrated before use; they are never silently overwritten.
+
+For text-only transports, the UI displays URL-safe Base64 ciphertext; this does
+not replace encryption or authentication.
 
 ## Other current commands
 

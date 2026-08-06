@@ -9,5 +9,14 @@ services:
     working_dir: /workspace
     volumes:
       - ./codebase:/workspace
+      # Keep Cargo's dependency and git-source caches between `run --rm`
+      # containers. This avoids cloning the pinned libsignal revision for
+      # every build while retaining the reproducibility of Cargo.lock.
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
     stdin_open: true
     tty: true
+
+volumes:
+  cargo-registry:
+  cargo-git:
