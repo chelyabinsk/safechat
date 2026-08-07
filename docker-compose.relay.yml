@@ -1,10 +1,7 @@
 services:
   safechat-relay:
     container_name: safechat-relay
-    build:
-      context: ./codebase
-      dockerfile: relay/Dockerfile
-    image: safechat-relay:latest
+    image: ${SAFECHAT_RELAY_IMAGE:-ghcr.io/chelyabinsk/safechat-relay:latest}
     user: ${SAFECHAT_RELAY_USER:-safechat-relay}
     environment:
       SAFECHAT_RELAY_ADMIN_TOKEN: ${SAFECHAT_RELAY_ADMIN_TOKEN:?set an admin token before starting the relay}

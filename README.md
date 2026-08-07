@@ -150,7 +150,16 @@ then let Caddy handle HTTPS and certificate renewal:
 ```sh
 export SAFECHAT_RELAY_HOSTNAME=relay.example.com
 export SAFECHAT_RELAY_ADMIN_TOKEN='<high-entropy-admin-token>'
-docker compose -f docker-compose.relay.yml up -d --build
+docker compose -f docker-compose.relay.yml pull
+docker compose -f docker-compose.relay.yml up -d
+```
+
+The Compose deployment pulls the prebuilt relay image from GHCR, so the VPS
+does not need a Rust toolchain or a local compilation step. For a private
+GHCR package, authenticate Docker on the VPS first:
+
+```sh
+docker login ghcr.io
 ```
 
 Caddy publishes port 8443 for HTTPS and port 80 for ACME certificate
@@ -187,12 +196,16 @@ Carrier writing and transport integrations are developed as separate adapters.
 ## Release binaries
 
 Push a version tag from a commit on `main` to build Linux, Windows, and macOS
-release archives and attach them to a GitHub release:
+release archives, publish the relay image to GHCR, and attach the binaries to
+a GitHub release:
 
 ```sh
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+The relay image is published as
+`ghcr.io/chelyabinsk/safechat-relay:<version>` and `:latest`.
 
 The workflow runs only for `v*` tags and rejects tags that do not point to a
 commit reachable from `main`.

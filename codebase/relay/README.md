@@ -92,13 +92,18 @@ and start the stack:
 ```sh
 export SAFECHAT_RELAY_HOSTNAME=relay.example.com
 export SAFECHAT_RELAY_ADMIN_TOKEN='<high-entropy-admin-token>'
-docker compose -f docker-compose.relay.yml up -d --build
+docker compose -f docker-compose.relay.yml pull
+docker compose -f docker-compose.relay.yml up -d
 ```
 
 Caddy publishes port 8443 for HTTPS and port 80 for ACME certificate
 issuance/renewal, obtains and renews the certificate, and proxies both HTTP
 API and WebSocket traffic to the private relay container. Clients use
 `https://relay.example.com:8443`. The relay itself publishes no host port.
+
+The Compose file uses the prebuilt image published at
+`ghcr.io/chelyabinsk/safechat-relay:latest`; override
+`SAFECHAT_RELAY_IMAGE` when using a fork or a pinned release tag.
 
 The image includes a CLI wrapper for this operation. When running the
 provided Compose service, add a client without stopping the container:
