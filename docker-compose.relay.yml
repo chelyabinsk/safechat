@@ -41,7 +41,7 @@ services:
       SAFECHAT_RELAY_HOSTNAME: ${SAFECHAT_RELAY_HOSTNAME:?set a public relay hostname}
     ports:
       - "80:80"
-      - "8443:443"
+      - "8443:8443"
     volumes:
       - ./Caddyfile.relay:/etc/caddy/Caddyfile:ro,Z
       - caddy-data:/data
