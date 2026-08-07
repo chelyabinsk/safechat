@@ -3,7 +3,9 @@
 use crate::relay_client::RelayClient;
 use anyhow::{Result, bail};
 use safechat_core::signal_adapter::SignalPreKeyBundle;
-use safechat_core::transport::{DeliveryStatus, MessageTransport, TransportMessage};
+use safechat_core::transport::{
+    ContactRequest, ContactTransport, DeliveryStatus, MessageTransport, TransportMessage,
+};
 use std::collections::HashMap;
 
 pub struct RelayTransport {
@@ -64,6 +66,10 @@ impl RelayTransport {
         let relay_bundle = self.client.fetch_bundle(client_id)?;
         RelayClient::decode_bundle(&relay_bundle)
     }
+
+    pub fn accepted_contacts(&mut self) -> Result<Vec<ContactRequest>> {
+        self.client.accepted_contacts()
+    }
 }
 
 impl MessageTransport for RelayTransport {
@@ -89,5 +95,23 @@ impl MessageTransport for RelayTransport {
 
     fn status(&mut self, message_id: &str) -> Result<DeliveryStatus> {
         self.client.status(message_id)
+    }
+}
+
+impl ContactTransport for RelayTransport {
+    fn request_contact(&mut self, recipient: &str, request: &ContactRequest) -> Result<()> {
+        self.client.request_contact(recipient, request)
+    }
+
+    fn pending_contacts(&mut self) -> Result<Vec<ContactRequest>> {
+        self.client.contact_requests(false)
+    }
+
+    fn accept_contact(&mut self, request_id: &str) -> Result<ContactRequest> {
+        self.client.accept_contact(request_id)
+    }
+
+    fn reject_contact(&mut self, request_id: &str) -> Result<()> {
+        self.client.reject_contact(request_id)
     }
 }

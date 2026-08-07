@@ -2,7 +2,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::{
-        Path, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode},
@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 const API_VERSION: &str = "safechat-relay-v1";
 const REGISTER_DOMAIN: &[u8] = b"safechat-relay-register-v1\0";
 const REQUEST_DOMAIN: &[u8] = b"safechat-relay-request-v1\0";
+const ENROLLMENT_REQUEST_DOMAIN: &[u8] = b"safechat-relay-enrollment-request-v1\0";
 const MAX_BODY: usize = 16 * 1024 * 1024;
 
 #[derive(Parser)]
@@ -96,6 +97,22 @@ enum Command {
         #[arg(long, default_value = "")]
         label: String,
     },
+    EnrollmentPending {
+        #[arg(long)]
+        database: PathBuf,
+    },
+    EnrollmentApprove {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        client_id: Option<String>,
+    },
+    EnrollmentReject {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        client_id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -134,6 +151,24 @@ struct RegisterRequest {
     signature: String,
 }
 
+#[derive(Deserialize)]
+struct EnrollmentRequest {
+    client_id: String,
+    device_address: String,
+    identity_key: String,
+    fingerprint: String,
+    bundle: String,
+    enrollment_secret_hash: String,
+    signature: String,
+}
+
+#[derive(Serialize)]
+struct EnrollmentResponse {
+    accepted: bool,
+    client_id: String,
+    expires_at: u64,
+}
+
 #[derive(Deserialize, Serialize)]
 struct RegisterResponse {
     access_token: String,
@@ -158,6 +193,32 @@ struct MessageRequest {
     message_id: String,
     ciphertext: String,
     expires_at: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ContactRequestPayload {
+    request_id: String,
+    recipient: String,
+    sender_name: String,
+    sender_fingerprint: String,
+    bundle: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ContactRequestResponse {
+    request_id: String,
+    sender_id: String,
+    recipient: String,
+    sender_name: String,
+    sender_fingerprint: String,
+    bundle: String,
+    status: String,
+    created_at: u64,
+}
+
+#[derive(Deserialize)]
+struct ContactQuery {
+    direction: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -254,6 +315,61 @@ async fn main() -> anyhow::Result<()> {
             )?;
             println!("allowlisted client through relay");
         }
+        Command::EnrollmentPending { database } => {
+            let connection = open_database(&database)?;
+            initialize_schema(&connection)?;
+            let mut statement = connection.prepare(
+                "SELECT client_id, device_address, fingerprint, created_at, expires_at
+                 FROM enrollment_requests WHERE expires_at >= ?1 ORDER BY created_at",
+            )?;
+            let rows = statement.query_map(params![now() as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            let mut found = false;
+            for row in rows {
+                let (client_id, address, fingerprint, created_at, expires_at) = row?;
+                found = true;
+                println!("Client: {client_id}");
+                println!("Name: {address}");
+                println!("Fingerprint: {fingerprint}");
+                println!("Requested: {created_at} (expires {expires_at})");
+                println!();
+            }
+            if !found {
+                println!("No pending enrollment requests.");
+            }
+        }
+        Command::EnrollmentApprove {
+            database,
+            client_id,
+        } => {
+            let connection = open_database(&database)?;
+            initialize_schema(&connection)?;
+            let client_id = client_id.unwrap_or_else(|| choose_pending_enrollment(&connection));
+            approve_enrollment(&connection, &client_id)?;
+            println!("approved enrollment request for {client_id}");
+        }
+        Command::EnrollmentReject {
+            database,
+            client_id,
+        } => {
+            let connection = open_database(&database)?;
+            initialize_schema(&connection)?;
+            let changed = connection.execute(
+                "DELETE FROM enrollment_requests WHERE client_id = ?1",
+                params![client_id],
+            )?;
+            if changed == 0 {
+                anyhow::bail!("no pending enrollment request for {client_id}");
+            }
+            println!("rejected enrollment request for {client_id}");
+        }
         Command::Serve {
             bind,
             database,
@@ -332,6 +448,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/admin/allowlist", post(admin_allowlist))
         .route("/v1/devices/challenge", post(challenge))
+        .route("/v1/devices/enrollment-requests", post(enrollment_request))
         .route("/v1/devices/register", post(register))
         .route(
             "/v1/devices/{device}/bundle",
@@ -342,6 +459,18 @@ fn router(state: AppState) -> Router {
             get(fetch_bundle_by_address),
         )
         .route("/v1/messages", post(send_message).get(receive_messages))
+        .route(
+            "/v1/contacts/requests",
+            post(create_contact_request).get(list_contact_requests),
+        )
+        .route(
+            "/v1/contacts/requests/{request_id}/accept",
+            post(accept_contact_request),
+        )
+        .route(
+            "/v1/contacts/requests/{request_id}/reject",
+            post(reject_contact_request),
+        )
         .route("/v1/messages/status", get(message_status))
         .route("/v1/messages/{server_id}/ack", post(ack_message))
         .route("/v1/events", get(events))
@@ -380,6 +509,193 @@ async fn admin_allowlist(
 
 async fn health() -> impl IntoResponse {
     axum::Json(json!({"status": "ok", "api_version": API_VERSION}))
+}
+
+async fn enrollment_request(
+    State(state): State<AppState>,
+    axum::Json(request): axum::Json<EnrollmentRequest>,
+) -> Result<axum::Json<EnrollmentResponse>, ApiError> {
+    if request.client_id.is_empty()
+        || request.client_id.len() > 128
+        || request.device_address.len() > 256
+        || request.fingerprint.len() > 256
+        || request.enrollment_secret_hash.len() != 64
+        || request.bundle.len() > MAX_BODY
+    {
+        return Err(bad_request(anyhow::anyhow!(
+            "invalid enrollment request size"
+        )));
+    }
+    let identity_bytes = b64decode(&request.identity_key).map_err(bad_request)?;
+    let identity = IdentityKey::decode(&identity_bytes)
+        .map_err(|_| bad_request(anyhow::anyhow!("invalid identity key")))?;
+    let bundle = b64decode(&request.bundle).map_err(bad_request)?;
+    let mut signed = ENROLLMENT_REQUEST_DOMAIN.to_vec();
+    signed.extend(request.client_id.as_bytes());
+    signed.push(0);
+    signed.extend(request.device_address.as_bytes());
+    signed.push(0);
+    signed.extend(request.fingerprint.as_bytes());
+    signed.push(0);
+    signed.extend(request.enrollment_secret_hash.as_bytes());
+    signed.push(0);
+    signed.extend(Sha256::digest(&bundle));
+    let signature = b64decode(&request.signature).map_err(bad_request)?;
+    if !identity.public_key().verify_signature(&signed, &signature) {
+        return Err(unauthorized());
+    }
+    let expires_at = now().saturating_add(900);
+    let db = state.db.lock().await;
+    db.execute(
+        "INSERT OR REPLACE INTO enrollment_requests
+         (client_id, device_address, identity_key, fingerprint, bundle,
+          enrollment_secret_hash, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            request.client_id,
+            request.device_address,
+            identity_bytes,
+            request.fingerprint,
+            bundle,
+            request.enrollment_secret_hash,
+            now() as i64,
+            expires_at as i64,
+        ],
+    )
+    .map_err(internal)?;
+    Ok(axum::Json(EnrollmentResponse {
+        accepted: true,
+        client_id: request.client_id,
+        expires_at,
+    }))
+}
+
+async fn create_contact_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<axum::Json<ContactRequestResponse>, ApiError> {
+    let sender = authenticate_request(
+        &state,
+        &headers,
+        "POST",
+        "/v1/contacts/requests",
+        &body,
+        None,
+    )
+    .await?;
+    let request: ContactRequestPayload =
+        serde_json::from_slice(&body).map_err(|error| bad_request(error.into()))?;
+    let bundle = b64decode(&request.bundle).map_err(bad_request)?;
+    let db = state.db.lock().await;
+    let recipient_exists: Option<String> = db
+        .query_row(
+            "SELECT client_id FROM devices WHERE client_id = ?1",
+            params![request.recipient],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    if recipient_exists.is_none() {
+        return Err(not_found());
+    }
+    db.execute(
+        "INSERT OR IGNORE INTO contact_requests
+         (request_id, sender, recipient, sender_name, sender_fingerprint, bundle, status, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)",
+        params![request.request_id, sender, request.recipient, request.sender_name, request.sender_fingerprint, bundle, now() as i64, (now()+86400) as i64]
+    ).map_err(internal)?;
+    Ok(axum::Json(ContactRequestResponse {
+        request_id: request.request_id,
+        sender_id: sender,
+        recipient: request.recipient,
+        sender_name: request.sender_name,
+        sender_fingerprint: request.sender_fingerprint,
+        bundle: request.bundle,
+        status: "pending".into(),
+        created_at: now(),
+    }))
+}
+
+async fn list_contact_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ContactQuery>,
+) -> Result<axum::Json<Vec<ContactRequestResponse>>, ApiError> {
+    let caller =
+        authenticate_request(&state, &headers, "GET", "/v1/contacts/requests", &[], None).await?;
+    let db = state.db.lock().await;
+    let outgoing = query.direction.as_deref() == Some("outgoing");
+    let sql = if outgoing {
+        "SELECT c.request_id, c.recipient, c.recipient, d.device_address, a.fingerprint, d.bundle, c.status, c.created_at
+         FROM contact_requests c JOIN devices d ON d.client_id = c.recipient
+         JOIN allowlist a ON a.client_id = c.recipient
+         WHERE c.sender = ?1 AND c.expires_at >= ?2 ORDER BY c.created_at"
+    } else {
+        "SELECT request_id, sender, recipient, sender_name, sender_fingerprint, bundle, status, created_at
+         FROM contact_requests WHERE recipient = ?1 AND status = 'pending' AND expires_at >= ?2 ORDER BY created_at"
+    };
+    let mut statement = db.prepare(sql).map_err(internal)?;
+    let rows = statement
+        .query_map(params![caller, now() as i64], |row| {
+            Ok(ContactRequestResponse {
+                request_id: row.get(0)?,
+                sender_id: row.get(1)?,
+                recipient: row.get(2)?,
+                sender_name: row.get(3)?,
+                sender_fingerprint: row.get(4)?,
+                bundle: b64(&row.get::<_, Vec<u8>>(5)?),
+                status: row.get(6)?,
+                created_at: row.get::<_, i64>(7)? as u64,
+            })
+        })
+        .map_err(internal)?;
+    Ok(axum::Json(
+        rows.collect::<Result<Vec<_>, _>>().map_err(internal)?,
+    ))
+}
+
+async fn accept_contact_request(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<axum::Json<ContactRequestResponse>, ApiError> {
+    let recipient = authenticate_request(
+        &state,
+        &headers,
+        "POST",
+        &format!("/v1/contacts/requests/{request_id}/accept"),
+        b"null",
+        None,
+    )
+    .await?;
+    let db = state.db.lock().await;
+    db.execute("UPDATE contact_requests SET status = 'accepted' WHERE request_id = ?1 AND recipient = ?2 AND status = 'pending'", params![request_id, recipient]).map_err(internal)?;
+    let response = db.query_row("SELECT request_id, sender, recipient, sender_name, sender_fingerprint, bundle, status, created_at FROM contact_requests WHERE request_id = ?1 AND recipient = ?2", params![request_id, recipient], |row| Ok(ContactRequestResponse { request_id: row.get(0)?, sender_id: row.get(1)?, recipient: row.get(2)?, sender_name: row.get(3)?, sender_fingerprint: row.get(4)?, bundle: b64(&row.get::<_, Vec<u8>>(5)?), status: row.get(6)?, created_at: row.get::<_, i64>(7)? as u64 })).optional().map_err(internal)?.ok_or_else(not_found)?;
+    Ok(axum::Json(response))
+}
+
+async fn reject_contact_request(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let recipient = authenticate_request(
+        &state,
+        &headers,
+        "POST",
+        &format!("/v1/contacts/requests/{request_id}/reject"),
+        b"null",
+        None,
+    )
+    .await?;
+    let db = state.db.lock().await;
+    db.execute(
+        "UPDATE contact_requests SET status = 'rejected' WHERE request_id = ?1 AND recipient = ?2",
+        params![request_id, recipient],
+    )
+    .map_err(internal)?;
+    Ok(axum::Json(json!({"rejected": true})))
 }
 
 async fn capabilities() -> impl IntoResponse {
@@ -905,8 +1221,84 @@ fn open_database(path: &PathBuf) -> anyhow::Result<Connection> {
 }
 
 fn initialize_schema(db: &Connection) -> anyhow::Result<()> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS allowlist (client_id TEXT PRIMARY KEY, identity_key BLOB NOT NULL, fingerprint TEXT NOT NULL, enrollment_secret_hash TEXT NOT NULL, enrollment_used INTEGER NOT NULL DEFAULT 0, device_address TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, label TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS challenges (client_id TEXT PRIMARY KEY, challenge BLOB NOT NULL, expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS devices (client_id TEXT PRIMARY KEY, identity_key BLOB NOT NULL, device_address TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, bundle BLOB NOT NULL, last_seen_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS request_nonces (client_id TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(client_id, nonce)); CREATE TABLE IF NOT EXISTS messages (server_id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, client_message_id TEXT NOT NULL, ciphertext BLOB NOT NULL, accepted_at INTEGER NOT NULL, expires_at INTEGER, acknowledged_at INTEGER, UNIQUE(sender, recipient, client_message_id));")?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS allowlist (client_id TEXT PRIMARY KEY, identity_key BLOB NOT NULL, fingerprint TEXT NOT NULL, enrollment_secret_hash TEXT NOT NULL, enrollment_used INTEGER NOT NULL DEFAULT 0, device_address TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, label TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS enrollment_requests (client_id TEXT PRIMARY KEY, device_address TEXT NOT NULL, identity_key BLOB NOT NULL, fingerprint TEXT NOT NULL, bundle BLOB NOT NULL, enrollment_secret_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS challenges (client_id TEXT PRIMARY KEY, challenge BLOB NOT NULL, expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS devices (client_id TEXT PRIMARY KEY, identity_key BLOB NOT NULL, device_address TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, bundle BLOB NOT NULL, last_seen_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS request_nonces (client_id TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(client_id, nonce)); CREATE TABLE IF NOT EXISTS messages (server_id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, client_message_id TEXT NOT NULL, ciphertext BLOB NOT NULL, accepted_at INTEGER NOT NULL, expires_at INTEGER, acknowledged_at INTEGER, UNIQUE(sender, recipient, client_message_id)); CREATE TABLE IF NOT EXISTS contact_requests (request_id TEXT PRIMARY KEY, sender TEXT NOT NULL, recipient TEXT NOT NULL, sender_name TEXT NOT NULL, sender_fingerprint TEXT NOT NULL, bundle BLOB NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);")?;
     Ok(())
+}
+
+fn approve_enrollment(db: &Connection, client_id: &str) -> anyhow::Result<()> {
+    let request: (String, Vec<u8>, String, String, String) = db
+        .query_row(
+            "SELECT device_address, identity_key, fingerprint, enrollment_secret_hash, client_id
+             FROM enrollment_requests WHERE client_id = ?1 AND expires_at >= ?2",
+            params![client_id, now() as i64],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("no active enrollment request for {client_id}"))?;
+    db.execute(
+        "INSERT OR REPLACE INTO allowlist
+         (client_id, identity_key, fingerprint, enrollment_secret_hash,
+          enrollment_used, device_address, status, label, created_at)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5, 'active', ?5, ?6)",
+        params![
+            request.4,
+            request.1,
+            request.2,
+            request.3,
+            request.0,
+            now() as i64
+        ],
+    )?;
+    db.execute(
+        "DELETE FROM enrollment_requests WHERE client_id = ?1",
+        params![client_id],
+    )?;
+    Ok(())
+}
+
+fn choose_pending_enrollment(db: &Connection) -> String {
+    let mut statement = db
+        .prepare(
+            "SELECT client_id, device_address, fingerprint FROM enrollment_requests
+             WHERE expires_at >= ?1 ORDER BY created_at",
+        )
+        .expect("preparing enrollment list");
+    let rows = statement
+        .query_map(params![now() as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("listing enrollment requests")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("reading enrollment requests");
+    if rows.is_empty() {
+        panic!("no active enrollment requests");
+    }
+    println!("Pending enrollment requests:");
+    for (index, (client_id, address, fingerprint)) in rows.iter().enumerate() {
+        println!("{}. {} ({})", index + 1, address, client_id);
+        println!("   fingerprint: {fingerprint}");
+    }
+    println!("Approve request number:");
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .expect("reading enrollment selection");
+    let index = input.trim().parse::<usize>().expect("request number") - 1;
+    rows.get(index)
+        .map(|row| row.0.clone())
+        .expect("request number out of range")
 }
 
 fn add_allowlist(
@@ -964,7 +1356,10 @@ fn internal<E: std::fmt::Display>(error: E) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::to_bytes, http::Request};
+    use axum::{
+        body::to_bytes,
+        http::{HeaderMap, Request},
+    };
     use signal_protocol::IdentityKeyPair;
     use std::{fs, path::PathBuf};
     use tower::ServiceExt;
@@ -1000,6 +1395,40 @@ mod tests {
         assert_eq!(stored.0, hash("one-time-secret"));
         assert_ne!(stored.0, "one-time-secret");
         assert_eq!(stored.1, 0);
+    }
+
+    #[test]
+    fn enrollment_approval_promotes_pending_request_without_plaintext_secret() {
+        let database = test_database();
+        let mut rng = rand::rng();
+        let identity = IdentityKeyPair::generate(&mut rng);
+        let identity_bytes = identity.identity_key().serialize();
+        database
+            .execute(
+                "INSERT INTO enrollment_requests
+                 (client_id, device_address, identity_key, fingerprint, bundle,
+                  enrollment_secret_hash, created_at, expires_at)
+                 VALUES ('client-a', 'Alice.1', ?1, 'fingerprint-a', ?2, ?3, ?4, ?5)",
+                params![
+                    identity_bytes.as_ref(),
+                    b"bundle",
+                    hash("secret"),
+                    now(),
+                    now() + 900
+                ],
+            )
+            .unwrap();
+        approve_enrollment(&database, "client-a").unwrap();
+        let stored: (String, String, i64) = database
+            .query_row(
+                "SELECT enrollment_secret_hash, status, enrollment_used FROM allowlist WHERE client_id = 'client-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, hash("secret"));
+        assert_eq!(stored.1, "active");
+        assert_eq!(stored.2, 0);
     }
 
     #[test]
@@ -1222,6 +1651,98 @@ mod tests {
         *request.headers_mut() = headers;
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn contact_request_can_be_submitted_accepted_and_seen_by_sender() {
+        let database = test_database();
+        let mut rng = rand::rng();
+        let alice = IdentityKeyPair::generate(&mut rng);
+        let bob = IdentityKeyPair::generate(&mut rng);
+        for (id, identity, token, address) in [
+            ("alice", &alice, "alice-token", "Alice.1"),
+            ("bob", &bob, "bob-token", "Bob.1"),
+        ] {
+            let identity_bytes = identity.identity_key().serialize();
+            database.execute(
+                "INSERT INTO allowlist (client_id, identity_key, fingerprint, enrollment_secret_hash, status, label, created_at) VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6)",
+                params![id, identity_bytes.as_ref(), format!("{id}-fp"), hash("secret"), address, now()],
+            ).unwrap();
+            database.execute(
+                "INSERT INTO devices (client_id, identity_key, device_address, token_hash, bundle, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, identity_bytes.as_ref(), address, hash(token), format!("{id}-bundle").as_bytes(), now()],
+            ).unwrap();
+        }
+        let app = router(AppState {
+            db: Arc::new(Mutex::new(database)),
+            admin_token: None,
+        });
+        let body = serde_json::to_vec(&json!({
+            "request_id": "cr-1",
+            "recipient": "bob",
+            "sender_name": "Alice",
+            "sender_fingerprint": "alice-fp",
+            "bundle": b64(b"alice-bundle")
+        }))
+        .unwrap();
+        let mut request = Request::post("/v1/contacts/requests")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.clone()))
+            .unwrap();
+        *request.headers_mut() = signed_headers(
+            &alice,
+            "alice-token",
+            "POST",
+            "/v1/contacts/requests",
+            &body,
+            "n1",
+        )
+        .0;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut request = Request::get("/v1/contacts/requests")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *request.headers_mut() =
+            signed_headers(&bob, "bob-token", "GET", "/v1/contacts/requests", &[], "n2").0;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let incoming: Vec<ContactRequestResponse> =
+            serde_json::from_slice(&to_bytes(response.into_body(), MAX_BODY).await.unwrap())
+                .unwrap();
+        assert_eq!(incoming.len(), 1);
+        let mut request = Request::post("/v1/contacts/requests/cr-1/accept")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *request.headers_mut() = signed_headers(
+            &bob,
+            "bob-token",
+            "POST",
+            "/v1/contacts/requests/cr-1/accept",
+            b"null",
+            "n3",
+        )
+        .0;
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut request = Request::get("/v1/contacts/requests?direction=outgoing")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *request.headers_mut() = signed_headers(
+            &alice,
+            "alice-token",
+            "GET",
+            "/v1/contacts/requests",
+            &[],
+            "n4",
+        )
+        .0;
+        let response = app.oneshot(request).await.unwrap();
+        let outgoing: Vec<ContactRequestResponse> =
+            serde_json::from_slice(&to_bytes(response.into_body(), MAX_BODY).await.unwrap())
+                .unwrap();
+        assert_eq!(outgoing[0].status, "accepted");
+        assert_eq!(outgoing[0].bundle, b64(b"bob-bundle"));
     }
 
     #[tokio::test]

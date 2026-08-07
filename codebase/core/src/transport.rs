@@ -25,6 +25,25 @@ pub enum DeliveryStatus {
     Read,
 }
 
+/// A carrier-neutral request to establish a private conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContactRequest {
+    pub request_id: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub sender_fingerprint: String,
+    pub bundle: Vec<u8>,
+}
+
+/// Boundary for contact discovery and approval. Implementations own only
+/// transport delivery; the UI owns prompts and the Signal layer owns trust.
+pub trait ContactTransport {
+    fn request_contact(&mut self, recipient: &str, request: &ContactRequest) -> Result<()>;
+    fn pending_contacts(&mut self) -> Result<Vec<ContactRequest>>;
+    fn accept_contact(&mut self, request_id: &str) -> Result<ContactRequest>;
+    fn reject_contact(&mut self, request_id: &str) -> Result<()>;
+}
+
 /// Common network/message-carrier boundary.
 ///
 /// Implementations transport already-encrypted SafeChat envelopes. They do

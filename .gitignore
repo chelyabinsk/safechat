@@ -25,6 +25,8 @@ demo/
 
 # Native TLS material for the local relay deployment.
 relay-tls/
+relay-data-local/
+relay-tls-local/
 
 # Editor and OS files.
 .DS_Store

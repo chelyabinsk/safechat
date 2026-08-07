@@ -71,7 +71,7 @@ currently selected peer.
 
 ### Relay-backed UI
 
-Start the UI with the allowlisted client ID and relay URL:
+Start the UI with the relay URL:
 
 ```sh
 docker compose run --rm rust-dev cargo run --locked --bin safechat-ui -- \
@@ -87,15 +87,19 @@ an untrusted network.
 
 For a local test relay using a self-signed certificate, add
 `--relay-ca-cert /path/to/ca.pem`. On first launch the UI registers the
-device and stores the resulting relay session token encrypted with the
-profile password. If `--relay-client-id` is omitted, the UI generates a
-stable client ID from the local identity and displays the client ID, public
-identity key, and fingerprint for the relay administrator to allowlist. The
-UI waits for allowlisting and can retry enrollment without restarting. The
-enrollment secret is not needed on later launches.
+device and stores the resulting relay session token and relay configuration
+encrypted with the profile password. If `--relay-client-id` is omitted, the UI
+generates a stable client ID from the local identity and submits a signed
+enrollment request. The UI waits for administrator approval and retries
+enrollment without restarting. The enrollment secret is retained only inside
+the encrypted profile configuration.
 
-At startup, choose Copy/paste or Relay. With Relay selected, `/add-peer`
-fetches a peer's public bundle from the relay and confirms its fingerprint.
+At startup, choose Copy/paste or Relay. With Relay selected, the client submits
+its signed enrollment request automatically when the administrator has not yet
+approved it. Once approved, registration retries automatically. Use
+`/add-contact <safechat-id>` to send a contact request; incoming requests are
+shown automatically and reviewed with `/contacts`. Both users confirm the
+displayed fingerprint before the private lobby is created.
 Relay mode behaves like a normal messenger: type ordinary text to encrypt and
 send it, while the UI checks for and displays incoming messages automatically.
 `/s` and `/send` remain available as explicit send aliases, and `/r` and

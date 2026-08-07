@@ -40,6 +40,8 @@ pub struct RelayConfig {
     pub base_url: String,
     #[serde(default)]
     pub allow_insecure_http: bool,
+    #[serde(default)]
+    pub enrollment_secret: String,
 }
 
 /// Persistence port consumed by the application chat service.

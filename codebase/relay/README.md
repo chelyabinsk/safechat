@@ -11,10 +11,31 @@ From `codebase/`:
 cargo build --release --locked -p safechat-relay
 ```
 
-## Allowlist a client
+## Enroll a client
 
-The administrator needs the client's Base64 identity key, fingerprint, client
-ID, and one-time enrollment secret:
+New clients submit a signed enrollment request automatically. On the relay
+host, inspect pending requests:
+
+```sh
+safechat-relay enrollment-pending --database relay.db
+```
+
+Approve one interactively, or specify its client ID:
+
+```sh
+safechat-relay enrollment-approve --database relay.db
+safechat-relay enrollment-approve --database relay.db --client-id <client-id>
+```
+
+Reject a request with:
+
+```sh
+safechat-relay enrollment-reject --database relay.db --client-id <client-id>
+```
+
+The request includes the client's signed identity, fingerprint, display name,
+and one-time enrollment secret hash. Approval does not require restarting the
+relay. The older manual allowlist command remains available for migrations:
 
 ```sh
 safechat-relay allowlist-add \
@@ -122,6 +143,21 @@ docker exec safechat-relay safechat-relay allowlist-add-remote \
 The admin token is read from `SAFECHAT_RELAY_ADMIN_TOKEN` inside the
 container. This command talks to the live admin endpoint over the relay's
 private loopback HTTP listener; it does not open the relay database separately.
+
+For the normal enrollment flow, inspect and approve signed requests directly
+inside the running container:
+
+```sh
+docker exec -it safechat-relay safechat-relay \
+  enrollment-pending --database /var/lib/safechat-relay/relay.db
+
+docker exec -it safechat-relay safechat-relay \
+  enrollment-approve --database /var/lib/safechat-relay/relay.db
+```
+
+The second command shows each pending client ID, name, and fingerprint and
+asks which request to approve. Use `enrollment-reject` with `--client-id` to
+reject one.
 
 The container image is defined in `Dockerfile`. Mount the database as an
 external volume. For native TLS deployments, also mount the TLS directory;

@@ -15,15 +15,18 @@ use safechat::relay_transport::RelayTransport;
 use safechat::signal_adapter::{
     MessageId, SignalPreKeyBundle, SqliteSignalState, identity_fingerprint,
 };
-use safechat::transport::{BundleTransport, RecoveryTransport, TextTransport};
+use safechat::transport::{
+    BundleTransport, ContactRequest, ContactTransport, RecoveryTransport, TextTransport,
+};
 use sha2::{Digest, Sha256};
+use signal_rand::{TryRngCore, rngs::OsRng};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(clap::Parser)]
 #[command(name = "safechat-ui", version, about = "Friendly SafeChat text chat")]
@@ -78,14 +81,14 @@ fn main() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
     let paths = ProfilePaths::new(cli.data_dir.clone(), &cli.profile)?;
     paths.create()?;
-    let password = unlock_password(&paths.history)?;
+    let password = unlock_password(&paths)?;
     let mut state = futures_executor::block_on(open_or_initialize(&paths, &password))?;
     restrict_file(&paths.database)?;
     // Refresh the local prekey inventory and rotate lifecycle keys before
     // loading the private lobbies.
     futures_executor::block_on(state.export_bundle())?;
 
-    let mut peers = load_peers(&paths.peers)?;
+    let peers = load_peers(&paths.peers)?;
     let saved_relay_config = load_relay_config(&paths.relay_config, &password)?;
     let relay_options = choose_transport(&cli, saved_relay_config.as_ref())?;
     if let Some(options) = relay_options.as_ref() {
@@ -95,22 +98,13 @@ fn main() -> Result<()> {
             &RelayConfig {
                 base_url: options.base_url.clone(),
                 allow_insecure_http: options.allow_insecure_http,
+                enrollment_secret: options.enrollment_secret.clone(),
             },
         )?;
     }
-    let mut relay = setup_relay(&paths, &password, &mut state, relay_options.as_ref())?;
+    let relay = setup_relay(&paths, &password, &mut state, relay_options.as_ref())?;
     if peers.is_empty() {
-        println!("No conversation is configured yet.");
-        let peer = if let Some(runtime) = relay.as_mut() {
-            let name = Input::<String>::new()
-                .with_prompt("Peer relay client ID")
-                .interact_text()?;
-            add_relay_peer(&paths, &password, &mut state, runtime, &name)?
-        } else {
-            println!("We will create your identity and guide you through setup.");
-            futures_executor::block_on(setup_peer(&paths, &mut state))?
-        };
-        peers.push(peer);
+        println!("No private lobby yet. Use /add-peer to connect to someone.");
     }
 
     let legacy_history = paths
@@ -184,29 +178,29 @@ fn setup_relay(
         client.restore_access_token(token);
     } else {
         let bundle = futures_executor::block_on(state.export_bundle())?;
-        println!("Relay enrollment details:");
-        println!("Client ID: {client_id}");
-        println!(
-            "Identity key: {}",
-            URL_SAFE_NO_PAD.encode(identity.identity_key().serialize().as_ref())
-        );
-        println!(
-            "Fingerprint: {}",
-            futures_executor::block_on(state.local_identity_fingerprint())?
-        );
+        let fingerprint = futures_executor::block_on(state.local_identity_fingerprint())?;
+        println!("Your SafeChat ID: {client_id}");
+        println!("Your fingerprint: {fingerprint}");
+        let mut enrollment_requested = false;
         let registration = loop {
             match client.register(&bundle) {
                 Ok(registration) => break registration,
                 Err(error) => {
-                    println!("Relay enrollment is not complete: {error:#}");
-                    println!("Have the administrator allowlist the details above, then retry.");
-                    if !Confirm::new()
-                        .with_prompt("Retry relay enrollment now?")
-                        .default(true)
-                        .interact()?
-                    {
+                    if !enrollment_requested && !options.enrollment_secret.is_empty() {
+                        client.submit_enrollment_request(&bundle, &fingerprint)?;
+                        enrollment_requested = true;
+                        println!(
+                            "Enrollment request submitted. Ask the relay administrator to review client {client_id} and approve its fingerprint."
+                        );
+                    }
+                    if !enrollment_requested {
                         return Err(error);
                     }
+                    println!("Relay enrollment is not complete: {error:#}");
+                    println!(
+                        "Waiting for administrator approval; retrying in 5 seconds. Press Ctrl+C to cancel."
+                    );
+                    std::thread::sleep(Duration::from_secs(5));
                 }
             }
         };
@@ -222,6 +216,14 @@ fn setup_relay(
 fn generated_relay_client_id(identity: &signal_protocol::IdentityKeyPair) -> String {
     let digest = Sha256::digest(identity.identity_key().serialize().as_ref());
     format!("sc-{}", URL_SAFE_NO_PAD.encode(&digest[..12]))
+}
+
+fn generated_enrollment_secret() -> String {
+    let mut secret = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut secret)
+        .expect("system random source unavailable");
+    URL_SAFE_NO_PAD.encode(secret)
 }
 
 fn choose_transport(cli: &Cli, saved: Option<&RelayConfig>) -> Result<Option<RelayOptions>> {
@@ -263,27 +265,29 @@ fn prompt_relay_options(
                 .interact_text()
                 .unwrap_or_default()
         });
-    let allow_insecure_http = if base_url.starts_with("http://")
-        && saved.map_or(true, |config| {
-            config.base_url != base_url || !config.allow_insecure_http
-        }) {
-        Confirm::new()
-            .with_prompt(
-                "This relay uses unencrypted HTTP. Message contents remain end-to-end encrypted, but credentials and metadata can be intercepted. Continue?",
-            )
-            .default(false)
-            .interact()?
+    let allow_insecure_http = if base_url.starts_with("http://") {
+        if saved.is_some_and(|config| config.base_url == base_url && config.allow_insecure_http) {
+            true
+        } else {
+            Confirm::new()
+                .with_prompt(
+                    "This relay uses unencrypted HTTP. Message contents remain end-to-end encrypted, but credentials and metadata can be intercepted. Continue?",
+                )
+                .default(false)
+                .interact()?
+        }
     } else {
         false
     };
     let client_id = client_id.cloned().unwrap_or_default();
-    let enrollment_secret = enrollment_secret.cloned().unwrap_or_else(|| {
-        Password::new()
-            .with_prompt("Relay enrollment secret (leave empty if already registered)")
-            .allow_empty_password(true)
-            .interact()
-            .unwrap_or_default()
-    });
+    let enrollment_secret = enrollment_secret
+        .cloned()
+        .or_else(|| {
+            saved
+                .map(|config| config.enrollment_secret.clone())
+                .filter(|secret| !secret.is_empty())
+        })
+        .unwrap_or_else(generated_enrollment_secret);
     let ca_certificate_pem = match ca_certificate {
         Some(path) => Some(fs::read(path).context("reading relay CA certificate")?),
         None if saved.is_some() => None,
@@ -386,8 +390,8 @@ fn safe_component(value: &str) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
-fn unlock_password(history_path: &Path) -> Result<String> {
-    if history_path.exists() {
+fn unlock_password(paths: &ProfilePaths) -> Result<String> {
+    if paths.database.exists() || paths.history.exists() || paths.relay_session.exists() {
         println!("Unlocking encrypted chat history.");
         Password::new()
             .with_prompt("Password")
@@ -501,6 +505,121 @@ fn add_relay_peer(
     Ok(bundle)
 }
 
+fn review_contact_requests(
+    paths: &ProfilePaths,
+    password: &str,
+    state: &mut SqliteSignalState,
+    runtime: &mut RelayTransport,
+    peers: &mut Vec<SignalPreKeyBundle>,
+    histories: &mut Vec<HistoryFile>,
+    current: &mut usize,
+) -> Result<()> {
+    let requests = runtime.pending_contacts()?;
+    if requests.is_empty() {
+        println!("No pending contact requests.");
+        return Ok(());
+    }
+    for request in requests {
+        let bundle = SignalPreKeyBundle::decode(&request.bundle)?;
+        let fingerprint = identity_fingerprint(&bundle.identity_key()?);
+        println!("Incoming contact request from {}", request.sender_name);
+        println!("SafeChat ID: {}", request.sender_id);
+        println!("Fingerprint: {fingerprint}");
+        if normalize_fingerprint(&request.sender_fingerprint) != normalize_fingerprint(&fingerprint)
+        {
+            println!("Rejected: the request fingerprint does not match the signed bundle.");
+            runtime.reject_contact(&request.request_id)?;
+            continue;
+        }
+        if !Confirm::new()
+            .with_prompt(format!("Accept and trust this fingerprint {fingerprint}?"))
+            .default(false)
+            .interact()?
+        {
+            runtime.reject_contact(&request.request_id)?;
+            continue;
+        }
+        runtime.accept_contact(&request.request_id)?;
+        futures_executor::block_on(state.trust_bundle(&bundle))?;
+        runtime.set_peer_id(bundle.name.clone(), request.sender_id);
+        save_relay_peer_ids(&paths.relay_peers, password, runtime.peer_ids())?;
+        write_bundle(
+            &paths
+                .peers
+                .join(format!("{}.bundle", peer_file_component(&bundle))),
+            &bundle,
+        )?;
+        if let Some(index) = peers
+            .iter()
+            .position(|peer| peer.address() == bundle.address())
+        {
+            peers[index] = bundle;
+            *current = index;
+        } else {
+            peers.push(bundle);
+            histories.push(HistoryFile {
+                version: PROFILE_VERSION,
+                entries: Vec::new(),
+            });
+            *current = peers.len() - 1;
+        }
+        println!("Contact accepted. Private lobby is ready.");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn integrate_accepted_contact(
+    paths: &ProfilePaths,
+    password: &str,
+    state: &mut SqliteSignalState,
+    runtime: &mut RelayTransport,
+    request: ContactRequest,
+    peers: &mut Vec<SignalPreKeyBundle>,
+    histories: &mut Vec<HistoryFile>,
+    current: &mut usize,
+) -> Result<()> {
+    let bundle = SignalPreKeyBundle::decode(&request.bundle)?;
+    let fingerprint = identity_fingerprint(&bundle.identity_key()?);
+    println!("{} accepted your contact request.", request.sender_name);
+    println!("Fingerprint: {fingerprint}");
+    if normalize_fingerprint(&request.sender_fingerprint) != normalize_fingerprint(&fingerprint) {
+        bail!("relay returned a contact bundle with a mismatched fingerprint");
+    }
+    if !Confirm::new()
+        .with_prompt("Confirm fingerprint and create private lobby?")
+        .default(false)
+        .interact()?
+    {
+        return Ok(());
+    }
+    futures_executor::block_on(state.trust_bundle(&bundle))?;
+    runtime.set_peer_id(bundle.name.clone(), request.sender_id);
+    save_relay_peer_ids(&paths.relay_peers, password, runtime.peer_ids())?;
+    write_bundle(
+        &paths
+            .peers
+            .join(format!("{}.bundle", peer_file_component(&bundle))),
+        &bundle,
+    )?;
+    if let Some(index) = peers
+        .iter()
+        .position(|peer| peer.address() == bundle.address())
+    {
+        peers[index] = bundle;
+        *current = index;
+    } else {
+        peers.push(bundle);
+        histories.push(HistoryFile {
+            version: PROFILE_VERSION,
+            entries: Vec::new(),
+        });
+        *current = peers.len() - 1;
+    }
+    println!("Private lobby is ready.");
+    Ok(())
+}
+
 fn load_peers(directory: &Path) -> Result<Vec<SignalPreKeyBundle>> {
     let mut paths = fs::read_dir(directory)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -600,6 +719,8 @@ fn chat_loop(
     mut relay: Option<RelayTransport>,
 ) -> Result<()> {
     let mut current = 0;
+    let mut announced_contacts = HashSet::new();
+    let mut announced_accepted = HashSet::new();
     println!();
     if let Some(peer) = peers.first() {
         println!("Conversation with {}", peer.address());
@@ -608,15 +729,55 @@ fn chat_loop(
     }
     println!("Type /help for commands.");
     loop {
+        if let Some(runtime) = relay.as_mut() {
+            if let Ok(requests) = runtime.pending_contacts() {
+                for request in requests {
+                    if announced_contacts.insert(request.request_id.clone()) {
+                        println!(
+                            "Incoming contact request from {} ({}) — use /contacts to review.",
+                            request.sender_name, request.sender_id
+                        );
+                    }
+                }
+            }
+            if let Ok(requests) = runtime.accepted_contacts() {
+                for request in requests {
+                    if runtime
+                        .peer_ids()
+                        .values()
+                        .any(|client_id| client_id == &request.sender_id)
+                    {
+                        announced_accepted.insert(request.request_id.clone());
+                        continue;
+                    }
+                    if announced_accepted.insert(request.request_id.clone()) {
+                        integrate_accepted_contact(
+                            paths,
+                            password,
+                            state,
+                            runtime,
+                            request,
+                            &mut peers,
+                            histories,
+                            &mut current,
+                        )?;
+                    }
+                }
+            }
+        }
         let command = if let Some(runtime) = relay.as_mut() {
-            read_relay_input(
-                paths,
-                password,
-                &mut histories[current],
-                state,
-                &peers[current],
-                runtime,
-            )?
+            if peers.is_empty() {
+                read_relay_input_without_peer(runtime, &mut announced_contacts)?
+            } else {
+                read_relay_input(
+                    paths,
+                    password,
+                    &mut histories[current],
+                    state,
+                    &peers[current],
+                    runtime,
+                )?
+            }
         } else {
             Input::<String>::new().with_prompt("> ").interact_text()?
         };
@@ -663,6 +824,10 @@ fn chat_loop(
             continue;
         }
         if relay.is_some() && !command.starts_with('/') && !command.is_empty() {
+            if peers.is_empty() {
+                println!("No active private lobby. Use /add-contact first.");
+                continue;
+            }
             send_plaintext(
                 paths,
                 password,
@@ -694,6 +859,7 @@ fn chat_loop(
                         &RelayConfig {
                             base_url: options.base_url.clone(),
                             allow_insecure_http: options.allow_insecure_http,
+                            enrollment_secret: options.enrollment_secret.clone(),
                         },
                     )?;
                     println!("Transport changed to Relay.");
@@ -708,6 +874,7 @@ fn chat_loop(
                     &RelayConfig {
                         base_url: options.base_url.clone(),
                         allow_insecure_http: options.allow_insecure_http,
+                        enrollment_secret: options.enrollment_secret.clone(),
                     },
                 )?;
                 println!("Relay transport settings updated.");
@@ -737,10 +904,25 @@ fn chat_loop(
                 relay.as_mut(),
             )?,
             "/peers" => list_peers(&peers, current)?,
+            "/contacts" => {
+                let Some(runtime) = relay.as_mut() else {
+                    println!("Contact requests require Relay transport.");
+                    continue;
+                };
+                review_contact_requests(
+                    paths,
+                    password,
+                    state,
+                    runtime,
+                    &mut peers,
+                    histories,
+                    &mut current,
+                )?;
+            }
             "/add-peer" => {
                 let peer = if let Some(runtime) = relay.as_mut() {
                     let name = Input::<String>::new()
-                        .with_prompt("Peer relay client ID")
+                        .with_prompt("SafeChat ID to connect to")
                         .interact_text()?;
                     add_relay_peer(paths, password, state, runtime, &name)?
                 } else {
@@ -915,6 +1097,39 @@ fn chat_loop(
                     }
                 }
             }
+            command if command == "/add-contact" || command.starts_with("/add-contact ") => {
+                let Some(runtime) = relay.as_mut() else {
+                    println!("Contact requests require Relay transport.");
+                    continue;
+                };
+                let recipient = command
+                    .strip_prefix("/add-contact")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                let recipient = if recipient.is_empty() {
+                    Input::<String>::new()
+                        .with_prompt("SafeChat ID to connect to")
+                        .interact_text()?
+                } else {
+                    recipient
+                };
+                let bundle = futures_executor::block_on(state.export_bundle())?;
+                let request = ContactRequest {
+                    request_id: format!(
+                        "cr-{}",
+                        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+                    ),
+                    sender_id: runtime.client_id().to_owned(),
+                    sender_name: bundle.address().name().to_owned(),
+                    sender_fingerprint: futures_executor::block_on(
+                        state.local_identity_fingerprint(),
+                    )?,
+                    bundle: bundle.encode()?,
+                };
+                runtime.request_contact(&recipient, &request)?;
+                println!("Contact request sent to {recipient}.");
+            }
             command if command.starts_with("/use ") => {
                 let selector = command.trim_start_matches("/use ").trim();
                 if let Some(index) = peers.iter().position(|peer| {
@@ -960,7 +1175,9 @@ fn print_help() {
     println!("/receive   paste and decrypt ciphertext");
     println!("/peers     list trusted peers and the active conversation");
     println!("/use NAME  switch the active conversation");
-    println!("/add-peer  trust another participant's bundle");
+    println!("/add-contact ID  request a private lobby through Relay");
+    println!("/add-peer        legacy alias for /add-contact");
+    println!("/contacts       review incoming contact requests");
     println!("/keys      show key inventory and rotation diagnostics");
     println!("/replace-identity  revoke sessions and create a new identity");
     println!("/accept-recovery  accept a signed replacement notice after fingerprint verification");
@@ -1216,6 +1433,57 @@ fn read_relay_input(
 
         if receive_relay(paths, password, history, state, peer, runtime)? > 0 {
             term.write_str(&format!("\r\x1b[2K> {line}"))?;
+        }
+    }
+}
+
+/// Read relay-mode input before a private lobby exists, while still surfacing
+/// incoming contact requests without requiring the user to submit a command.
+fn read_relay_input_without_peer(
+    runtime: &mut RelayTransport,
+    announced_contacts: &mut HashSet<String>,
+) -> Result<String> {
+    let term = Term::stdout();
+    let _raw_mode = RawMode::new()?;
+    let mut line = String::new();
+    term.write_str("> ")?;
+    loop {
+        match read_relay_key(&term)? {
+            Some(Key::Char(character)) => {
+                line.push(character);
+                term.write_str(&character.to_string())?;
+            }
+            Some(Key::Backspace) => {
+                if line.pop().is_some() {
+                    term.write_str("\x08 \x08")?;
+                }
+            }
+            Some(Key::Enter) => {
+                term.write_line("")?;
+                return Ok(line);
+            }
+            Some(Key::CtrlC) => {
+                term.write_line("^C")?;
+                return Ok("/quit".to_owned());
+            }
+            Some(Key::Escape) => {
+                line.clear();
+                term.write_str("\r\x1b[2K> ")?;
+            }
+            Some(_) | None => {}
+        }
+
+        if let Ok(requests) = runtime.pending_contacts() {
+            for request in requests {
+                if announced_contacts.insert(request.request_id) {
+                    term.write_str("\r\x1b[2K")?;
+                    term.write_line(&format!(
+                        "Incoming contact request from {} ({}) — use /contacts to review.",
+                        request.sender_name, request.sender_id
+                    ))?;
+                    term.write_str(&format!("> {line}"))?;
+                }
+            }
         }
     }
 }

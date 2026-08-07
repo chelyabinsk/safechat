@@ -8,7 +8,9 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::blocking::{Client, Response};
 use reqwest::{Method, StatusCode, Url, header};
 use safechat_core::signal_adapter::SignalPreKeyBundle;
-use safechat_core::transport::{DeliveryStatus, MessageTransport, TransportMessage};
+use safechat_core::transport::{
+    ContactRequest, DeliveryStatus, MessageTransport, TransportMessage,
+};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -18,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const REGISTER_DOMAIN: &[u8] = b"safechat-relay-register-v1\0";
 const REQUEST_DOMAIN: &[u8] = b"safechat-relay-request-v1\0";
+const ENROLLMENT_REQUEST_DOMAIN: &[u8] = b"safechat-relay-enrollment-request-v1\0";
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -54,6 +57,16 @@ pub struct RelayMessageStatus {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+struct ContactResponse {
+    request_id: String,
+    sender_id: String,
+    sender_name: String,
+    sender_fingerprint: String,
+    bundle: String,
+    status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct ChallengeResponse {
     challenge: String,
 }
@@ -63,6 +76,13 @@ pub struct RelayRegistration {
     pub access_token: String,
     pub device_id: String,
     pub api_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct EnrollmentResponse {
+    pub accepted: bool,
+    pub client_id: String,
+    pub expires_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -163,6 +183,47 @@ impl RelayClient {
         Ok(registration)
     }
 
+    pub fn submit_enrollment_request(
+        &self,
+        bundle: &SignalPreKeyBundle,
+        fingerprint: &str,
+    ) -> Result<EnrollmentResponse> {
+        let bundle_bytes = bundle.encode()?;
+        let identity_key = self.identity_pair.identity_key().serialize();
+        let secret_hash = hash(&self.config.enrollment_secret);
+        let mut signed = ENROLLMENT_REQUEST_DOMAIN.to_vec();
+        signed.extend(self.config.client_id.as_bytes());
+        signed.push(0);
+        signed.extend(bundle.address().to_string().as_bytes());
+        signed.push(0);
+        signed.extend(fingerprint.as_bytes());
+        signed.push(0);
+        signed.extend(secret_hash.as_bytes());
+        signed.push(0);
+        signed.extend(Sha256::digest(&bundle_bytes));
+        let mut rng = OsRng.unwrap_err();
+        let signature = self
+            .identity_pair
+            .private_key()
+            .calculate_signature(&signed, &mut rng)?;
+        let response: EnrollmentResponse = self
+            .http
+            .post(self.url("/v1/devices/enrollment-requests")?)
+            .json(&json!({
+                "client_id": self.config.client_id,
+                "device_address": bundle.address().to_string(),
+                "identity_key": encode(&identity_key),
+                "fingerprint": fingerprint,
+                "bundle": encode(&bundle_bytes),
+                "enrollment_secret_hash": secret_hash,
+                "signature": encode(&signature),
+            }))
+            .send()
+            .context("submitting relay enrollment request")
+            .and_then(parse_json)?;
+        Ok(response)
+    }
+
     pub fn publish_bundle(&self, bundle: &SignalPreKeyBundle) -> Result<RelayBundle> {
         let bundle = encode(&bundle.encode()?);
         self.signed_json(
@@ -234,6 +295,88 @@ impl RelayClient {
             &format!("/v1/messages/status?message_id={message_id}"),
             serde_json::Value::Null,
         )
+    }
+
+    pub fn request_contact(&self, recipient: &str, request: &ContactRequest) -> Result<()> {
+        let _: ContactResponse = self.signed_json(
+            Method::POST,
+            "/v1/contacts/requests",
+            json!({
+                "request_id": request.request_id,
+                "recipient": recipient,
+                "sender_name": request.sender_name,
+                "sender_fingerprint": request.sender_fingerprint,
+                "bundle": encode(&request.bundle),
+            }),
+        )?;
+        Ok(())
+    }
+
+    pub fn contact_requests(&self, outgoing: bool) -> Result<Vec<ContactRequest>> {
+        let path = if outgoing {
+            "/v1/contacts/requests?direction=outgoing"
+        } else {
+            "/v1/contacts/requests"
+        };
+        let responses: Vec<ContactResponse> =
+            self.signed_json(Method::GET, path, serde_json::Value::Null)?;
+        responses
+            .into_iter()
+            .map(|response| {
+                Ok(ContactRequest {
+                    request_id: response.request_id,
+                    sender_id: response.sender_id,
+                    sender_name: response.sender_name,
+                    sender_fingerprint: response.sender_fingerprint,
+                    bundle: URL_SAFE_NO_PAD.decode(response.bundle)?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn accepted_contacts(&self) -> Result<Vec<ContactRequest>> {
+        let responses: Vec<ContactResponse> = self.signed_json(
+            Method::GET,
+            "/v1/contacts/requests?direction=outgoing",
+            serde_json::Value::Null,
+        )?;
+        responses
+            .into_iter()
+            .filter(|response| response.status == "accepted")
+            .map(|response| {
+                Ok(ContactRequest {
+                    request_id: response.request_id,
+                    sender_id: response.sender_id,
+                    sender_name: response.sender_name,
+                    sender_fingerprint: response.sender_fingerprint,
+                    bundle: URL_SAFE_NO_PAD.decode(response.bundle)?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn accept_contact(&self, request_id: &str) -> Result<ContactRequest> {
+        let response: ContactResponse = self.signed_json(
+            Method::POST,
+            &format!("/v1/contacts/requests/{request_id}/accept"),
+            serde_json::Value::Null,
+        )?;
+        Ok(ContactRequest {
+            request_id: response.request_id,
+            sender_id: response.sender_id,
+            sender_name: response.sender_name,
+            sender_fingerprint: response.sender_fingerprint,
+            bundle: URL_SAFE_NO_PAD.decode(response.bundle)?,
+        })
+    }
+
+    pub fn reject_contact(&self, request_id: &str) -> Result<()> {
+        let _: serde_json::Value = self.signed_json(
+            Method::POST,
+            &format!("/v1/contacts/requests/{request_id}/reject"),
+            serde_json::Value::Null,
+        )?;
+        Ok(())
     }
 
     fn signed_json<T: DeserializeOwned>(
@@ -372,6 +515,13 @@ fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+fn hash(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
