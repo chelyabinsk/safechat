@@ -3,6 +3,107 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
+/// A carrier-neutral message received from a transport.
+///
+/// `transport_id` is opaque to the messaging layer. HTTP relays use a server
+/// row ID, while a future P2P transport can use a connection-local or
+/// protocol-defined identifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransportMessage {
+    pub transport_id: String,
+    pub sender: String,
+    pub sender_address: Option<String>,
+    pub message_id: String,
+    pub ciphertext: Vec<u8>,
+    pub accepted_at: u64,
+    pub expires_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeliveryStatus {
+    Sent,
+    Read,
+}
+
+/// Common network/message-carrier boundary.
+///
+/// Implementations transport already-encrypted SafeChat envelopes. They do
+/// not perform Signal encryption, identity verification, or history storage.
+/// A future P2P adapter should implement this trait without changing the UI
+/// or Signal session code.
+pub trait MessageTransport {
+    fn send(
+        &mut self,
+        recipient: &str,
+        message_id: &str,
+        ciphertext: &[u8],
+        expires_at: Option<u64>,
+    ) -> Result<()>;
+
+    fn receive(&mut self, cursor: i64) -> Result<Vec<TransportMessage>>;
+
+    fn acknowledge(&mut self, message: &TransportMessage) -> Result<()>;
+
+    fn status(&mut self, message_id: &str) -> Result<DeliveryStatus>;
+}
+
+#[cfg(test)]
+mod message_transport_tests {
+    use super::{DeliveryStatus, MessageTransport, TransportMessage};
+    use anyhow::Result;
+
+    struct InMemoryTransport {
+        messages: Vec<TransportMessage>,
+    }
+
+    impl MessageTransport for InMemoryTransport {
+        fn send(
+            &mut self,
+            _recipient: &str,
+            message_id: &str,
+            ciphertext: &[u8],
+            _expires_at: Option<u64>,
+        ) -> Result<()> {
+            self.messages.push(TransportMessage {
+                transport_id: "memory-1".to_owned(),
+                sender: "sender".to_owned(),
+                sender_address: None,
+                message_id: message_id.to_owned(),
+                ciphertext: ciphertext.to_vec(),
+                accepted_at: 1,
+                expires_at: None,
+            });
+            Ok(())
+        }
+
+        fn receive(&mut self, _cursor: i64) -> Result<Vec<TransportMessage>> {
+            Ok(self.messages.clone())
+        }
+
+        fn acknowledge(&mut self, _message: &TransportMessage) -> Result<()> {
+            Ok(())
+        }
+
+        fn status(&mut self, _message_id: &str) -> Result<DeliveryStatus> {
+            Ok(DeliveryStatus::Read)
+        }
+    }
+
+    #[test]
+    fn message_transport_boundary_supports_send_receive_ack_and_status() {
+        let mut transport = InMemoryTransport {
+            messages: Vec::new(),
+        };
+        transport
+            .send("peer", "message-1", b"encrypted", None)
+            .unwrap();
+        let messages = transport.receive(0).unwrap();
+        assert_eq!(messages[0].message_id, "message-1");
+        transport.acknowledge(&messages[0]).unwrap();
+        assert_eq!(transport.status("message-1").unwrap(), DeliveryStatus::Read);
+    }
+}
+
 pub const TEXT_HEADER: &str = "safechat-text-v1:";
 pub const BUNDLE_HEADER: &str = "safechat-bundle-v1:";
 pub const RECOVERY_HEADER: &str = "safechat-recovery-v1:";

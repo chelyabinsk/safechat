@@ -4,6 +4,7 @@
 //! not expose relay storage or make the relay part of the Signal session.
 
 use crate::signal_adapter::SignalPreKeyBundle;
+use crate::transport::{DeliveryStatus, MessageTransport, TransportMessage};
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::blocking::{Client, Response};
@@ -286,6 +287,53 @@ impl RelayClient {
 
     fn url(&self, path: &str) -> Result<Url> {
         Ok(Url::parse(&format!("{}{}", self.config.base_url, path))?)
+    }
+}
+
+impl MessageTransport for RelayClient {
+    fn send(
+        &mut self,
+        recipient: &str,
+        message_id: &str,
+        ciphertext: &[u8],
+        expires_at: Option<u64>,
+    ) -> Result<()> {
+        self.send_message(recipient, message_id, ciphertext, expires_at)
+            .map(|_| ())
+    }
+
+    fn receive(&mut self, cursor: i64) -> Result<Vec<TransportMessage>> {
+        self.receive_messages(cursor)?
+            .into_iter()
+            .map(|message| {
+                Ok(TransportMessage {
+                    transport_id: message.server_id.to_string(),
+                    sender: message.sender,
+                    sender_address: message.sender_address,
+                    message_id: message.message_id,
+                    ciphertext: decode(&message.ciphertext)?,
+                    accepted_at: message.accepted_at,
+                    expires_at: message.expires_at,
+                })
+            })
+            .collect()
+    }
+
+    fn acknowledge(&mut self, message: &TransportMessage) -> Result<()> {
+        let server_id = message
+            .transport_id
+            .parse::<i64>()
+            .context("relay returned an invalid transport message ID")?;
+        RelayClient::acknowledge(self, server_id)
+    }
+
+    fn status(&mut self, message_id: &str) -> Result<DeliveryStatus> {
+        let status = self.message_status(message_id)?.status;
+        match status.as_str() {
+            "sent" => Ok(DeliveryStatus::Sent),
+            "read" => Ok(DeliveryStatus::Read),
+            other => bail!("relay returned unknown delivery status {other}"),
+        }
     }
 }
 

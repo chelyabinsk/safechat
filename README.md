@@ -107,6 +107,11 @@ server has queued the message, not that the recipient has opened it. Incoming
 messages are acknowledged by the recipient and shown with their receive
 timestamp.
 
+Transport implementations use a shared carrier-neutral message boundary. The
+relay adapter is the first network implementation; future P2P and media
+carriers can transport the same already-encrypted envelope without changing
+Signal sessions, message history, or chat commands.
+
 Use `/keys` for local prekey inventory and rotation diagnostics. If the device
 identity is compromised or must be replaced, use `/replace-identity`; this
 revokes current sessions, displays a new fingerprint and bundle, and emits a
