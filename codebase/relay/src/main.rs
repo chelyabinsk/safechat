@@ -44,10 +44,13 @@ enum Command {
         bind: SocketAddr,
         #[arg(long, default_value = "relay.db")]
         database: PathBuf,
-        #[arg(long)]
-        tls_cert: PathBuf,
-        #[arg(long)]
-        tls_key: PathBuf,
+        /// Run plain HTTP. Use only on a private network behind a TLS proxy.
+        #[arg(long, conflicts_with_all = ["tls_cert", "tls_key"])]
+        http: bool,
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
         /// Enable the live administrative allowlist endpoint.
         #[arg(long, env = "SAFECHAT_RELAY_ADMIN_TOKEN")]
         admin_token: Option<String>,
@@ -75,6 +78,9 @@ enum Command {
     AllowlistAddRemote {
         #[arg(long)]
         url: String,
+        /// Permit an HTTP URL for a localhost/private-network admin hop.
+        #[arg(long)]
+        allow_http: bool,
         #[arg(long, env = "SAFECHAT_RELAY_ADMIN_TOKEN")]
         admin_token: String,
         #[arg(long)]
@@ -224,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::AllowlistAddRemote {
             url,
+            allow_http,
             admin_token,
             ca_cert,
             client_id,
@@ -236,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
                 &url,
                 &admin_token,
                 ca_cert.as_deref(),
+                allow_http,
                 AdminAllowlistRequest {
                     client_id,
                     identity_key,
@@ -249,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve {
             bind,
             database,
+            http,
             tls_cert,
             tls_key,
             admin_token,
@@ -263,11 +272,21 @@ async fn main() -> anyhow::Result<()> {
                 admin_token,
             };
             let app = router(state);
-            let config = RustlsConfig::from_pem_file(tls_cert, tls_key).await?;
-            println!("safechat-relay listening on https://{bind}");
-            axum_server::bind_rustls(bind, config)
-                .serve(app.into_make_service())
+            if http {
+                println!("safechat-relay listening on http://{bind} (private proxy mode)");
+                let listener = tokio::net::TcpListener::bind(bind).await?;
+                axum::serve(listener, app).await?;
+            } else {
+                let config = RustlsConfig::from_pem_file(
+                    tls_cert.expect("tls_cert is required unless --http is set"),
+                    tls_key.expect("tls_key is required unless --http is set"),
+                )
                 .await?;
+                println!("safechat-relay listening on https://{bind}");
+                axum_server::bind_rustls(bind, config)
+                    .serve(app.into_make_service())
+                    .await?;
+            }
         }
     }
     Ok(())
@@ -277,11 +296,12 @@ fn allowlist_add_remote(
     base_url: &str,
     admin_token: &str,
     ca_cert: Option<&std::path::Path>,
+    allow_http: bool,
     request: AdminAllowlistRequest,
 ) -> anyhow::Result<()> {
     let parsed = reqwest::Url::parse(base_url)?;
-    if parsed.scheme() != "https" {
-        anyhow::bail!("relay URL must use HTTPS");
+    if parsed.scheme() != "https" && !(allow_http && parsed.scheme() == "http") {
+        anyhow::bail!("relay URL must use HTTPS (or pass --allow-http for a private hop)");
     }
     let mut builder = reqwest::blocking::Client::builder();
     if let Some(path) = ca_cert {

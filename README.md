@@ -144,12 +144,20 @@ or client profile database. Build it with:
 docker compose run --rm rust-dev cargo build --release --locked -p safechat-relay
 ```
 
-For a native-TLS container deployment, provide certificates under
-`./relay-tls/` and use:
+For the recommended public deployment, set a DNS name pointing to the VPS,
+then let Caddy handle HTTPS and certificate renewal:
 
 ```sh
+export SAFECHAT_RELAY_HOSTNAME=relay.example.com
+export SAFECHAT_RELAY_ADMIN_TOKEN='<high-entropy-admin-token>'
 docker compose -f docker-compose.relay.yml up -d --build
 ```
+
+Caddy publishes port 8443 for HTTPS and port 80 for ACME certificate
+issuance/renewal. Clients should use `https://relay.example.com:8443`. The
+relay runs without a published host port on a private Docker network. Native
+relay TLS remains available when running `safechat-relay` outside this Compose
+deployment.
 
 See [`codebase/relay/README.md`](codebase/relay/README.md) and
 [`docs/RELAY_SERVER_PLAN.md`](docs/RELAY_SERVER_PLAN.md) for enrollment and

@@ -1,0 +1,3 @@
+{$SAFECHAT_RELAY_HOSTNAME} {
+    reverse_proxy safechat-relay:8080
+}

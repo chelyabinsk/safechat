@@ -1,6 +1,6 @@
 # SafeChat Relay
 
-`safechat-relay` is an independent HTTPS/WebSocket relay. It does not depend
+`safechat-relay` is an independent HTTP(S)/WebSocket relay. It does not depend
 on the SafeChat client crate, UI, client profile, or client database.
 
 ## Build
@@ -68,13 +68,45 @@ The endpoint is disabled unless an admin token is configured. The token is
 separate from client enrollment credentials and must be protected like other
 server administration secrets.
 
+## Run behind Caddy
+
+For a public deployment, Caddy can terminate HTTPS and renew the public
+certificate automatically. Run the relay in explicit private HTTP mode:
+
+```sh
+safechat-relay serve \
+  --http \
+  --bind 0.0.0.0:8080 \
+  --database /var/lib/safechat-relay/relay.db \
+  --admin-token '<high-entropy-admin-token>'
+```
+
+Use `--http` only when the bind address is private or the process is behind a
+trusted TLS reverse proxy. Do not expose this listener directly to the
+Internet.
+
+The repository's `docker-compose.relay.yml` runs this mode behind Caddy. Set
+`SAFECHAT_RELAY_HOSTNAME` to the public DNS name, point that name at the VPS,
+and start the stack:
+
+```sh
+export SAFECHAT_RELAY_HOSTNAME=relay.example.com
+export SAFECHAT_RELAY_ADMIN_TOKEN='<high-entropy-admin-token>'
+docker compose -f docker-compose.relay.yml up -d --build
+```
+
+Caddy publishes port 8443 for HTTPS and port 80 for ACME certificate
+issuance/renewal, obtains and renews the certificate, and proxies both HTTP
+API and WebSocket traffic to the private relay container. Clients use
+`https://relay.example.com:8443`. The relay itself publishes no host port.
+
 The image includes a CLI wrapper for this operation. When running the
 provided Compose service, add a client without stopping the container:
 
 ```sh
 docker exec safechat-relay safechat-relay allowlist-add-remote \
-  --url https://127.0.0.1:8443 \
-  --ca-cert /etc/safechat-relay/tls/fullchain.pem \
+  --url http://127.0.0.1:8080 \
+  --allow-http \
   --client-id <client-id> \
   --identity-key <public-identity-key> \
   --fingerprint <fingerprint> \
@@ -83,8 +115,9 @@ docker exec safechat-relay safechat-relay allowlist-add-remote \
 ```
 
 The admin token is read from `SAFECHAT_RELAY_ADMIN_TOKEN` inside the
-container. This command talks to the live HTTPS admin endpoint; it does not
-open the relay database separately.
+container. This command talks to the live admin endpoint over the relay's
+private loopback HTTP listener; it does not open the relay database separately.
 
-The container image is defined in `Dockerfile`. Mount the database and TLS
-directory as external volumes; do not put private TLS keys in the image.
+The container image is defined in `Dockerfile`. Mount the database as an
+external volume. For native TLS deployments, also mount the TLS directory;
+the Caddy deployment does not require relay certificate files.

@@ -28,6 +28,6 @@ COPY --from=build /src/target/release/safechat-relay /usr/local/bin/safechat-rel
 
 USER safechat-relay
 WORKDIR /var/lib/safechat-relay
-EXPOSE 8443
+EXPOSE 8080 8443
 
-ENTRYPOINT ["/usr/local/bin/safechat-relay", "serve", "--bind", "0.0.0.0:8443", "--database", "/var/lib/safechat-relay/relay.db", "--tls-cert", "/etc/safechat-relay/tls/fullchain.pem", "--tls-key", "/etc/safechat-relay/tls/privkey.pem"]
+ENTRYPOINT ["/usr/local/bin/safechat-relay"]

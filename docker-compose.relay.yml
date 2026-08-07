@@ -19,11 +19,35 @@ services:
     mem_limit: 512m
     cpus: 1.0
     pids_limit: 128
-    ports:
-      - "8443:8443"
+    command:
+      - serve
+      - --http
+      - --bind
+      - 0.0.0.0:8080
+      - --database
+      - /var/lib/safechat-relay/relay.db
     volumes:
       - ${SAFECHAT_RELAY_DATA_DIR:-relay-data}:/var/lib/safechat-relay
-      - ${SAFECHAT_RELAY_TLS_DIR:-./relay-tls}:/etc/safechat-relay/tls:ro,Z
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: safechat-caddy
+    restart: unless-stopped
+    depends_on:
+      - safechat-relay
+    environment:
+      SAFECHAT_RELAY_HOSTNAME: ${SAFECHAT_RELAY_HOSTNAME:?set a public relay hostname}
+    ports:
+      - "80:80"
+      - "8443:443"
+    volumes:
+      - ./Caddyfile.relay:/etc/caddy/Caddyfile:ro,Z
+      - caddy-data:/data
+      - caddy-config:/config
 
 volumes:
   relay-data:
+  caddy-data:
+  caddy-config:
