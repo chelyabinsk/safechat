@@ -1,4 +1,4 @@
-//! Client-side HTTPS transport for the standalone SafeChat relay.
+//! Client-side HTTP(S) transport for the standalone SafeChat relay.
 //!
 //! This module contains only the HTTP contract and request signing. It does
 //! not expose relay storage or make the relay part of the Signal session.
@@ -26,6 +26,7 @@ pub struct RelayClientConfig {
     pub client_id: String,
     pub enrollment_secret: String,
     pub ca_certificate_pem: Option<Vec<u8>>,
+    pub allow_insecure_http: bool,
 }
 
 pub struct RelayClient {
@@ -73,13 +74,13 @@ pub struct RelayBundle {
 impl RelayClient {
     pub fn new(config: RelayClientConfig, identity_pair: IdentityKeyPair) -> Result<Self> {
         let mut base = Url::parse(&config.base_url).context("invalid relay URL")?;
-        if base.scheme() != "https" {
-            bail!("relay URL must use HTTPS");
+        if base.scheme() != "https" && !(config.allow_insecure_http && base.scheme() == "http") {
+            bail!("relay URL must use HTTPS unless insecure HTTP is explicitly enabled");
         }
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }
-        let mut builder = Client::builder().https_only(true);
+        let mut builder = Client::builder().https_only(!config.allow_insecure_http);
         if let Some(certificate) = &config.ca_certificate_pem {
             builder = builder.add_root_certificate(
                 reqwest::Certificate::from_pem(certificate)
@@ -378,7 +379,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relay_requires_https() {
+    fn relay_requires_https_by_default() {
         let pair = IdentityKeyPair::generate(&mut OsRng.unwrap_err());
         assert!(
             RelayClient::new(
@@ -387,10 +388,29 @@ mod tests {
                     client_id: "client".to_owned(),
                     enrollment_secret: "secret".to_owned(),
                     ca_certificate_pem: None,
+                    allow_insecure_http: false,
                 },
                 pair,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn relay_allows_explicit_insecure_http() {
+        let pair = IdentityKeyPair::generate(&mut OsRng.unwrap_err());
+        assert!(
+            RelayClient::new(
+                RelayClientConfig {
+                    base_url: "http://relay.invalid".to_owned(),
+                    client_id: "client".to_owned(),
+                    enrollment_secret: "secret".to_owned(),
+                    ca_certificate_pem: None,
+                    allow_insecure_http: true,
+                },
+                pair,
+            )
+            .is_ok()
         );
     }
 

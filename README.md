@@ -79,6 +79,12 @@ docker compose run --rm rust-dev cargo run --locked --bin safechat-ui -- \
   --relay-enrollment-secret '<one-time-secret>'
 ```
 
+For a trusted/private network, the relay URL may use `http://`. The UI asks
+for explicit confirmation because message contents remain end-to-end
+encrypted, but relay credentials, identities, metadata, and traffic patterns
+are exposed to network observers. Do not use HTTP for a public relay or over
+an untrusted network.
+
 For a local test relay using a self-signed certificate, add
 `--relay-ca-cert /path/to/ca.pem`. On first launch the UI registers the
 device and stores the resulting relay session token encrypted with the

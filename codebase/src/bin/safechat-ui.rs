@@ -6,8 +6,9 @@ use dialoguer::{Confirm, Input, Password, Select};
 use directories::ProjectDirs;
 use safechat::chat_service::{ChatEvent, ChatService};
 use safechat::profile_store::{
-    EncryptedHistoryStore, HistoryEntry, HistoryFile, PROFILE_VERSION, load_history,
-    load_relay_peer_ids, load_relay_token, save_history, save_relay_peer_ids, save_relay_token,
+    EncryptedHistoryStore, HistoryEntry, HistoryFile, PROFILE_VERSION, RelayConfig, load_history,
+    load_relay_config, load_relay_peer_ids, load_relay_token, save_history, save_relay_config,
+    save_relay_peer_ids, save_relay_token,
 };
 use safechat::relay_client::{RelayClient, RelayClientConfig};
 use safechat::relay_transport::RelayTransport;
@@ -33,7 +34,7 @@ struct Cli {
     /// Override the platform application-data directory.
     #[arg(long)]
     data_dir: Option<PathBuf>,
-    /// Relay HTTPS endpoint. Supplying this enables relay-backed /s and /r.
+    /// Relay endpoint. HTTPS is required unless HTTP is explicitly confirmed in the UI.
     #[arg(long)]
     relay_url: Option<String>,
     /// Allowlisted relay client ID.
@@ -55,6 +56,7 @@ struct ProfilePaths {
     lobby_histories: PathBuf,
     peers: PathBuf,
     relay_session: PathBuf,
+    relay_config: PathBuf,
     relay_peers: PathBuf,
 }
 
@@ -69,6 +71,7 @@ struct RelayOptions {
     client_id: String,
     enrollment_secret: String,
     ca_certificate_pem: Option<Vec<u8>>,
+    allow_insecure_http: bool,
 }
 
 fn main() -> Result<()> {
@@ -83,7 +86,18 @@ fn main() -> Result<()> {
     futures_executor::block_on(state.export_bundle())?;
 
     let mut peers = load_peers(&paths.peers)?;
-    let relay_options = choose_transport(&cli)?;
+    let saved_relay_config = load_relay_config(&paths.relay_config, &password)?;
+    let relay_options = choose_transport(&cli, saved_relay_config.as_ref())?;
+    if let Some(options) = relay_options.as_ref() {
+        save_relay_config(
+            &paths.relay_config,
+            &password,
+            &RelayConfig {
+                base_url: options.base_url.clone(),
+                allow_insecure_http: options.allow_insecure_http,
+            },
+        )?;
+    }
     let mut relay = setup_relay(&paths, &password, &mut state, relay_options.as_ref())?;
     if peers.is_empty() {
         println!("No conversation is configured yet.");
@@ -162,6 +176,7 @@ fn setup_relay(
         client_id: client_id.clone(),
         enrollment_secret: options.enrollment_secret.clone(),
         ca_certificate_pem: options.ca_certificate_pem.clone(),
+        allow_insecure_http: options.allow_insecure_http,
     };
     let mut client = RelayClient::new(config, identity)?;
     if paths.relay_session.exists() {
@@ -209,12 +224,16 @@ fn generated_relay_client_id(identity: &signal_protocol::IdentityKeyPair) -> Str
     format!("sc-{}", URL_SAFE_NO_PAD.encode(&digest[..12]))
 }
 
-fn choose_transport(cli: &Cli) -> Result<Option<RelayOptions>> {
+fn choose_transport(cli: &Cli, saved: Option<&RelayConfig>) -> Result<Option<RelayOptions>> {
     let choices = ["Copy/paste", "Relay"];
     let choice = Select::new()
         .with_prompt("Transport")
         .items(&choices)
-        .default(if cli.relay_url.is_some() { 1 } else { 0 })
+        .default(if cli.relay_url.is_some() || saved.is_some() {
+            1
+        } else {
+            0
+        })
         .interact()?;
     if choice == 0 {
         return Ok(None);
@@ -224,6 +243,7 @@ fn choose_transport(cli: &Cli) -> Result<Option<RelayOptions>> {
         cli.relay_client_id.as_ref(),
         cli.relay_enrollment_secret.as_ref(),
         cli.relay_ca_cert.as_ref(),
+        saved,
     )?))
 }
 
@@ -232,13 +252,30 @@ fn prompt_relay_options(
     client_id: Option<&String>,
     enrollment_secret: Option<&String>,
     ca_certificate: Option<&PathBuf>,
+    saved: Option<&RelayConfig>,
 ) -> Result<RelayOptions> {
-    let base_url = base_url.cloned().unwrap_or_else(|| {
-        Input::<String>::new()
-            .with_prompt("Relay HTTPS URL")
-            .interact_text()
-            .unwrap_or_default()
-    });
+    let base_url = base_url
+        .cloned()
+        .or_else(|| saved.map(|config| config.base_url.clone()))
+        .unwrap_or_else(|| {
+            Input::<String>::new()
+                .with_prompt("Relay URL (https:// recommended)")
+                .interact_text()
+                .unwrap_or_default()
+        });
+    let allow_insecure_http = if base_url.starts_with("http://")
+        && saved.map_or(true, |config| {
+            config.base_url != base_url || !config.allow_insecure_http
+        }) {
+        Confirm::new()
+            .with_prompt(
+                "This relay uses unencrypted HTTP. Message contents remain end-to-end encrypted, but credentials and metadata can be intercepted. Continue?",
+            )
+            .default(false)
+            .interact()?
+    } else {
+        false
+    };
     let client_id = client_id.cloned().unwrap_or_default();
     let enrollment_secret = enrollment_secret.cloned().unwrap_or_else(|| {
         Password::new()
@@ -249,6 +286,7 @@ fn prompt_relay_options(
     });
     let ca_certificate_pem = match ca_certificate {
         Some(path) => Some(fs::read(path).context("reading relay CA certificate")?),
+        None if saved.is_some() => None,
         None => {
             let path = Input::<String>::new()
                 .with_prompt("Relay CA certificate path (leave empty for a public CA)")
@@ -266,6 +304,7 @@ fn prompt_relay_options(
         client_id,
         enrollment_secret,
         ca_certificate_pem,
+        allow_insecure_http,
     })
 }
 
@@ -287,6 +326,7 @@ impl ProfilePaths {
             lobby_histories: root.join("lobbies"),
             peers: root.join("peers"),
             relay_session: root.join("relay-session.age"),
+            relay_config: root.join("relay-config.age"),
             relay_peers: root.join("relay-peers.age"),
         })
     }
@@ -646,14 +686,30 @@ fn chat_loop(
                     println!("Already using Relay transport.");
                     show_transport_info(relay.as_ref());
                 } else {
-                    let options = prompt_relay_options(None, None, None, None)?;
+                    let options = prompt_relay_options(None, None, None, None, None)?;
                     relay = setup_relay(paths, password, state, Some(&options))?;
+                    save_relay_config(
+                        &paths.relay_config,
+                        password,
+                        &RelayConfig {
+                            base_url: options.base_url.clone(),
+                            allow_insecure_http: options.allow_insecure_http,
+                        },
+                    )?;
                     println!("Transport changed to Relay.");
                 }
             }
             "/transport relay edit" => {
-                let options = prompt_relay_options(None, None, None, None)?;
+                let options = prompt_relay_options(None, None, None, None, None)?;
                 relay = setup_relay(paths, password, state, Some(&options))?;
+                save_relay_config(
+                    &paths.relay_config,
+                    password,
+                    &RelayConfig {
+                        base_url: options.base_url.clone(),
+                        allow_insecure_http: options.allow_insecure_http,
+                    },
+                )?;
                 println!("Relay transport settings updated.");
             }
             "/send" => send_message(

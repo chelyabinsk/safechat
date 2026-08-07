@@ -126,3 +126,22 @@ private loopback HTTP listener; it does not open the relay database separately.
 The container image is defined in `Dockerfile`. Mount the database as an
 external volume. For native TLS deployments, also mount the TLS directory;
 the Caddy deployment does not require relay certificate files.
+
+## Run plain HTTP on a trusted network
+
+For a private LAN, VPN, or other trusted network where HTTPS certificate
+management is intentionally omitted, the relay can run in plain HTTP mode:
+
+```sh
+safechat-relay serve \
+  --http \
+  --bind 0.0.0.0:8080 \
+  --database relay.db \
+  --admin-token '<high-entropy-admin-token>'
+```
+
+Clients can then enter an `http://` relay URL and must explicitly confirm the
+insecure transport warning. End-to-end message encryption still protects
+message contents, but HTTP exposes relay access tokens, client identities,
+metadata, and traffic patterns and permits active network interference. Never
+expose this mode directly to the public Internet.

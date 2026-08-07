@@ -35,6 +35,13 @@ pub struct HistoryEntry {
     pub delivery_status: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayConfig {
+    pub base_url: String,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+}
+
 /// Persistence port consumed by the application chat service.
 pub trait HistoryStore {
     fn load(&mut self, conversation: &str) -> Result<HistoryFile>;
@@ -114,6 +121,19 @@ pub fn load_relay_token(path: &Path, password: &str) -> Result<String> {
 
 pub fn save_relay_token(path: &Path, password: &str, token: &str) -> Result<()> {
     save_encrypted(path, password, token.as_bytes())
+}
+
+pub fn load_relay_config(path: &Path, password: &str) -> Result<Option<RelayConfig>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_slice(&decrypt_file(
+        path, password,
+    )?)?))
+}
+
+pub fn save_relay_config(path: &Path, password: &str, config: &RelayConfig) -> Result<()> {
+    save_encrypted(path, password, &serde_json::to_vec(config)?)
 }
 
 pub fn load_relay_peer_ids(path: &Path, password: &str) -> Result<HashMap<String, String>> {
