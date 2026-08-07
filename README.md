@@ -174,7 +174,7 @@ safechat blind-detect <PNG> --window-bits 1024 --threshold 0.05
 safechat benchmark --clean-dir <dir> --encoded-dir <dir>
 ```
 
-Carrier writing and transport integrations are deliberately not enabled yet.
+Carrier writing and transport integrations are developed as separate adapters.
 
 ## Release binaries
 
@@ -191,10 +191,12 @@ commit reachable from `main`.
 
 ## Repository layout
 
-- `codebase/` — Rust source and Cargo manifest, mounted into Docker at `/workspace`
-- `codebase/src/signal_adapter.rs` — SafeChat boundary around upstream libsignal
+- `codebase/core/` — Signal protocol, domain types, transport/history ports, and encrypted storage
+- `codebase/application/` — UI-independent chat use cases and event orchestration
+- `codebase/transports/` — relay and future P2P/media transport adapters
+- `codebase/src/` — terminal UI and standalone protocol/detector tools
+- `codebase/relay/` — standalone relay server, independent of the client crates
 - `codebase/src/carrier.rs` — carrier abstraction and evaluation PNG adapter
-- `codebase/src/transport.rs` — carrier-neutral text reference transport
 - `docs/` — design, protocol, and operational documentation
 
 The detector is a benchmark, not a security claim. Its baseline recognizes the

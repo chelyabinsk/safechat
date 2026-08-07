@@ -1,0 +1,9 @@
+[package]
+name = "safechat-application"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+futures-executor = "0.3"
+safechat-core = { path = "../core" }

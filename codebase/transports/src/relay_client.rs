@@ -3,12 +3,12 @@
 //! This module contains only the HTTP contract and request signing. It does
 //! not expose relay storage or make the relay part of the Signal session.
 
-use crate::signal_adapter::SignalPreKeyBundle;
-use crate::transport::{DeliveryStatus, MessageTransport, TransportMessage};
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::blocking::{Client, Response};
 use reqwest::{Method, StatusCode, Url, header};
+use safechat_core::signal_adapter::SignalPreKeyBundle;
+use safechat_core::transport::{DeliveryStatus, MessageTransport, TransportMessage};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};

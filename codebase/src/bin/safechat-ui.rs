@@ -6,16 +6,17 @@ use dialoguer::{Confirm, Input, Password, Select};
 use directories::ProjectDirs;
 use safechat::chat_service::{ChatEvent, ChatService};
 use safechat::profile_store::{
-    HistoryEntry, HistoryFile, PROFILE_VERSION, load_history, load_relay_peer_ids,
-    load_relay_token, save_history, save_relay_peer_ids, save_relay_token,
+    EncryptedHistoryStore, HistoryEntry, HistoryFile, PROFILE_VERSION, load_history,
+    load_relay_peer_ids, load_relay_token, save_history, save_relay_peer_ids, save_relay_token,
 };
 use safechat::relay_client::{RelayClient, RelayClientConfig};
+use safechat::relay_transport::RelayTransport;
 use safechat::signal_adapter::{
     MessageId, SignalPreKeyBundle, SqliteSignalState, identity_fingerprint,
 };
 use safechat::transport::{BundleTransport, RecoveryTransport, TextTransport};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 #[cfg(unix)]
@@ -61,11 +62,6 @@ struct ProfilePaths {
 enum HistoryView {
     Ciphertext,
     Clean,
-}
-
-struct RelayRuntime {
-    client: RelayClient,
-    peer_ids: HashMap<String, String>,
 }
 
 struct RelayOptions {
@@ -151,7 +147,7 @@ fn setup_relay(
     password: &str,
     state: &mut SqliteSignalState,
     options: Option<&RelayOptions>,
-) -> Result<Option<RelayRuntime>> {
+) -> Result<Option<RelayTransport>> {
     let Some(options) = options else {
         return Ok(None);
     };
@@ -202,10 +198,10 @@ fn setup_relay(
         save_relay_token(&paths.relay_session, password, &registration.access_token)?;
     }
     println!("Relay transport enabled for {client_id}.");
-    Ok(Some(RelayRuntime {
+    Ok(Some(RelayTransport::new(
         client,
-        peer_ids: load_relay_peer_ids(&paths.relay_peers, password)?,
-    }))
+        load_relay_peer_ids(&paths.relay_peers, password)?,
+    )))
 }
 
 fn generated_relay_client_id(identity: &signal_protocol::IdentityKeyPair) -> String {
@@ -437,11 +433,10 @@ fn add_relay_peer(
     paths: &ProfilePaths,
     password: &str,
     state: &mut SqliteSignalState,
-    runtime: &mut RelayRuntime,
+    runtime: &mut RelayTransport,
     client_id: &str,
 ) -> Result<SignalPreKeyBundle> {
-    let relay_bundle = runtime.client.fetch_bundle(client_id)?;
-    let bundle = RelayClient::decode_bundle(&relay_bundle)?;
+    let bundle = runtime.fetch_peer_bundle_by_id(client_id)?;
     let fingerprint = identity_fingerprint(&bundle.identity_key()?);
     println!(
         "Relay returned {} with fingerprint: {fingerprint}",
@@ -454,10 +449,8 @@ fn add_relay_peer(
         bail!("fingerprint does not match; the peer was not trusted");
     }
     futures_executor::block_on(state.trust_bundle(&bundle))?;
-    runtime
-        .peer_ids
-        .insert(bundle.name.clone(), client_id.to_owned());
-    save_relay_peer_ids(&paths.relay_peers, password, &runtime.peer_ids)?;
+    runtime.set_peer_id(bundle.name.clone(), client_id.to_owned());
+    save_relay_peer_ids(&paths.relay_peers, password, runtime.peer_ids())?;
     write_bundle(
         &paths
             .peers
@@ -564,7 +557,7 @@ fn chat_loop(
     histories: &mut Vec<HistoryFile>,
     state: &mut SqliteSignalState,
     mut peers: Vec<SignalPreKeyBundle>,
-    mut relay: Option<RelayRuntime>,
+    mut relay: Option<RelayTransport>,
 ) -> Result<()> {
     let mut current = 0;
     println!();
@@ -923,15 +916,15 @@ fn print_help() {
     println!("/quit      close the chat");
 }
 
-fn show_transport_info(relay: Option<&RelayRuntime>) {
+fn show_transport_info(relay: Option<&RelayTransport>) {
     match relay {
         Some(runtime) => {
             println!("Transport: Relay");
-            println!("Relay URL: {}", runtime.client.base_url());
-            println!("Relay client ID: {}", runtime.client.client_id());
+            println!("Relay URL: {}", runtime.base_url());
+            println!("Relay client ID: {}", runtime.client_id());
             println!(
                 "Relay session: {}",
-                if runtime.client.is_registered() {
+                if runtime.is_registered() {
                     "registered"
                 } else {
                     "not registered"
@@ -962,7 +955,7 @@ fn send_message(
     history: &mut HistoryFile,
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
-    relay: Option<&mut RelayRuntime>,
+    relay: Option<&mut RelayTransport>,
 ) -> Result<()> {
     let choices = ["Type a message", "Cancel"];
     let choice = Select::new()
@@ -987,18 +980,22 @@ fn send_plaintext(
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
     plaintext: &[u8],
-    mut relay: Option<&mut RelayRuntime>,
+    mut relay: Option<&mut RelayTransport>,
 ) -> Result<()> {
-    let encryption_peer = relay_peer_bundle(peer, relay.as_deref_mut())?;
+    let encryption_peer = match relay.as_deref_mut() {
+        Some(runtime) => runtime.fetch_peer_bundle(peer)?,
+        None => peer.clone(),
+    };
     if let Some(runtime) = relay {
-        let recipient = runtime
-            .peer_ids
-            .get(&peer.name)
-            .cloned()
-            .unwrap_or_else(|| peer.address().to_string());
-        let history_path = paths.lobby_history(peer);
+        let recipient = runtime.recipient_for(peer);
+        let mut history_store = EncryptedHistoryStore::new(&paths.lobby_histories, password);
         let event = {
-            let mut service = ChatService::new(state, &mut runtime.client, &history_path, password);
+            let mut service = ChatService::new(
+                state,
+                runtime,
+                &mut history_store,
+                peer.address().to_string(),
+            );
             service.send_text(history, peer, &encryption_peer, &recipient, plaintext)?
         };
         if let ChatEvent::Sent { timestamp, text } = event {
@@ -1011,26 +1008,6 @@ fn send_plaintext(
     send_envelope(
         paths, password, history, peer, message_id, plaintext, &envelope,
     )
-}
-
-fn relay_peer_bundle(
-    peer: &SignalPreKeyBundle,
-    relay: Option<&mut RelayRuntime>,
-) -> Result<SignalPreKeyBundle> {
-    let Some(runtime) = relay else {
-        return Ok(peer.clone());
-    };
-    let relay_bundle = if let Some(relay_id) = runtime.peer_ids.get(&peer.name) {
-        runtime.client.fetch_bundle(relay_id)?
-    } else {
-        let address = peer.address().to_string();
-        runtime.client.fetch_bundle(&address)?
-    };
-    let fetched = RelayClient::decode_bundle(&relay_bundle)?;
-    if fetched.address() != peer.address() || fetched.identity_key()? != peer.identity_key()? {
-        bail!("relay peer bundle does not match the locally verified identity");
-    }
-    Ok(fetched)
 }
 
 fn send_envelope(
@@ -1065,7 +1042,7 @@ fn receive_message(
     history: &mut HistoryFile,
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
-    relay: Option<&mut RelayRuntime>,
+    relay: Option<&mut RelayTransport>,
 ) -> Result<()> {
     if let Some(runtime) = relay {
         let received = receive_relay(paths, password, history, state, peer, runtime)?;
@@ -1094,7 +1071,7 @@ fn receive_ciphertext(
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
     ciphertext: &str,
-    _relay: Option<&mut RelayRuntime>,
+    _relay: Option<&mut RelayTransport>,
 ) -> Result<()> {
     let envelope = TextTransport.decode(ciphertext)?;
     receive_envelope(paths, password, history, state, peer, &envelope)
@@ -1106,12 +1083,17 @@ fn receive_relay(
     history: &mut HistoryFile,
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
-    runtime: &mut RelayRuntime,
+    runtime: &mut RelayTransport,
 ) -> Result<usize> {
-    let relay_sender_id = runtime.peer_ids.get(&peer.name).cloned();
-    let history_path = paths.lobby_history(peer);
+    let relay_sender_id = runtime.sender_id_for(peer).map(str::to_owned);
+    let mut history_store = EncryptedHistoryStore::new(&paths.lobby_histories, password);
     let events = {
-        let mut service = ChatService::new(state, &mut runtime.client, &history_path, password);
+        let mut service = ChatService::new(
+            state,
+            runtime,
+            &mut history_store,
+            peer.address().to_string(),
+        );
         service.poll(history, peer, relay_sender_id.as_deref())?
     };
     for event in &events {
@@ -1144,7 +1126,7 @@ fn read_relay_input(
     history: &mut HistoryFile,
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
-    runtime: &mut RelayRuntime,
+    runtime: &mut RelayTransport,
 ) -> Result<String> {
     let term = Term::stdout();
     let _raw_mode = RawMode::new()?;

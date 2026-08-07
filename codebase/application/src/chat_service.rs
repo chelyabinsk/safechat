@@ -1,10 +1,9 @@
 //! Application-level chat operations shared by UI and future front ends.
 
-use crate::profile_store::{HistoryEntry, HistoryFile, save_history};
-use crate::signal_adapter::{SignalPreKeyBundle, SqliteSignalState};
-use crate::transport::{DeliveryStatus, MessageTransport, TextTransport};
 use anyhow::{Context, Result};
-use std::path::Path;
+use safechat_core::profile_store::{HistoryEntry, HistoryFile, HistoryStore};
+use safechat_core::signal_adapter::{SignalPreKeyBundle, SqliteSignalState};
+use safechat_core::transport::{DeliveryStatus, MessageTransport, TextTransport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
@@ -29,22 +28,22 @@ pub enum ChatEvent {
 pub struct ChatService<'a> {
     state: &'a mut SqliteSignalState,
     transport: &'a mut dyn MessageTransport,
-    history_path: &'a Path,
-    password: &'a str,
+    history_store: &'a mut dyn HistoryStore,
+    conversation: String,
 }
 
 impl<'a> ChatService<'a> {
     pub fn new(
         state: &'a mut SqliteSignalState,
         transport: &'a mut dyn MessageTransport,
-        history_path: &'a Path,
-        password: &'a str,
+        history_store: &'a mut dyn HistoryStore,
+        conversation: impl Into<String>,
     ) -> Self {
         Self {
             state,
             transport,
-            history_path,
-            password,
+            history_store,
+            conversation: conversation.into(),
         }
     }
 
@@ -71,7 +70,7 @@ impl<'a> ChatService<'a> {
             ciphertext: TextTransport.encode(&envelope).trim().to_owned(),
             delivery_status: "sent".to_owned(),
         });
-        save_history(self.history_path, self.password, history)?;
+        self.history_store.save(&self.conversation, history)?;
         Ok(ChatEvent::Sent { timestamp, text })
     }
 
@@ -99,7 +98,7 @@ impl<'a> ChatService<'a> {
             }
         }
         if history_changed {
-            save_history(self.history_path, self.password, history)?;
+            self.history_store.save(&self.conversation, history)?;
         }
 
         let peer_address = peer.address().to_string();
@@ -143,7 +142,7 @@ impl<'a> ChatService<'a> {
                     ciphertext: TextTransport.encode(&message.ciphertext).trim().to_owned(),
                     delivery_status: "received".to_owned(),
                 });
-                save_history(self.history_path, self.password, history)?;
+                self.history_store.save(&self.conversation, history)?;
                 events.push(ChatEvent::Received {
                     timestamp,
                     sender: peer.name.clone(),

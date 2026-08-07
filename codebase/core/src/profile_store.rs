@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const PROFILE_VERSION: u32 = 1;
 
@@ -33,6 +33,51 @@ pub struct HistoryEntry {
     pub ciphertext: String,
     #[serde(default)]
     pub delivery_status: String,
+}
+
+/// Persistence port consumed by the application chat service.
+pub trait HistoryStore {
+    fn load(&mut self, conversation: &str) -> Result<HistoryFile>;
+    fn save(&mut self, conversation: &str, history: &HistoryFile) -> Result<()>;
+}
+
+/// Encrypted age-backed history adapter for the desktop profile.
+pub struct EncryptedHistoryStore {
+    root: PathBuf,
+    password: String,
+}
+
+impl EncryptedHistoryStore {
+    pub fn new(root: impl Into<PathBuf>, password: impl Into<String>) -> Self {
+        Self {
+            root: root.into(),
+            password: password.into(),
+        }
+    }
+
+    fn path_for(&self, conversation: &str) -> PathBuf {
+        let component = conversation
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        self.root.join(format!("{component}.age"))
+    }
+}
+
+impl HistoryStore for EncryptedHistoryStore {
+    fn load(&mut self, conversation: &str) -> Result<HistoryFile> {
+        load_history(&self.path_for(conversation), &self.password)
+    }
+
+    fn save(&mut self, conversation: &str, history: &HistoryFile) -> Result<()> {
+        save_history(&self.path_for(conversation), &self.password, history)
+    }
 }
 
 pub fn load_history(path: &Path, password: &str) -> Result<HistoryFile> {

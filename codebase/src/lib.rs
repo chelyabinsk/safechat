@@ -1,7 +1,8 @@
-//! Reusable SafeChat protocol boundaries shared by the command-line tools.
+//! Compatibility facade for the CLI package.
+//!
+//! Reusable protocol and application code lives in `safechat-core`; this
+//! facade keeps existing `safechat::...` imports working for the binaries.
 
-pub mod chat_service;
-pub mod profile_store;
-pub mod relay_client;
-pub mod signal_adapter;
-pub mod transport;
+pub use safechat_application::*;
+pub use safechat_core::*;
+pub use safechat_transports::*;

@@ -1,0 +1,16 @@
+[package]
+name = "safechat-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+age = "0.11"
+anyhow = "1.0"
+base64 = "0.22"
+futures-executor = "0.3"
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+signal-protocol = { package = "libsignal-protocol", git = "https://github.com/signalapp/libsignal.git", rev = "b5121d07c72f9e631f178d907ca892587f64f9e2" }
+signal-rand = { package = "rand", version = "0.9" }
