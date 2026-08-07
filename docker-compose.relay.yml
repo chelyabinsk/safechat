@@ -34,6 +34,9 @@ services:
     restart: unless-stopped
     depends_on:
       - safechat-relay
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     environment:
       SAFECHAT_RELAY_HOSTNAME: ${SAFECHAT_RELAY_HOSTNAME:?set a public relay hostname}
     ports:
