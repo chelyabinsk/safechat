@@ -195,13 +195,13 @@ Carrier writing and transport integrations are developed as separate adapters.
 
 ## Release binaries
 
-Push a version tag from a commit on `main` to build Linux, Windows, and macOS
+Push a version tag from a commit on `main` to build Linux and Windows
 release archives, publish the relay image to GHCR, and attach the binaries to
 a GitHub release:
 
 ```sh
-git tag v0.2.3
-git push origin v0.2.3
+git tag v0.2.4
+git push origin v0.2.4
 ```
 
 The relay image is published as
