@@ -200,8 +200,8 @@ release archives, publish the relay image to GHCR, and attach the binaries to
 a GitHub release:
 
 ```sh
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
 The relay image is published as
