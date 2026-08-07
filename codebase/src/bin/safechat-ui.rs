@@ -795,7 +795,7 @@ fn chat_loop(
             if message.trim().is_empty() {
                 println!("Usage: /s <plain text>");
             } else {
-                send_plaintext(
+                if let Err(error) = send_plaintext(
                     paths,
                     password,
                     &mut histories[current],
@@ -803,7 +803,9 @@ fn chat_loop(
                     &peers[current],
                     message.as_bytes(),
                     relay.as_mut(),
-                )?;
+                ) {
+                    report_relay_operation_error(&error);
+                }
             }
             continue;
         }
@@ -828,7 +830,7 @@ fn chat_loop(
                 println!("No active private lobby. Use /add-contact first.");
                 continue;
             }
-            send_plaintext(
+            if let Err(error) = send_plaintext(
                 paths,
                 password,
                 &mut histories[current],
@@ -836,7 +838,9 @@ fn chat_loop(
                 &peers[current],
                 command.as_bytes(),
                 relay.as_mut(),
-            )?;
+            ) {
+                report_relay_operation_error(&error);
+            }
             continue;
         }
         match command {
@@ -879,30 +883,30 @@ fn chat_loop(
                 )?;
                 println!("Relay transport settings updated.");
             }
-            "/send" => send_message(
-                paths,
-                password,
-                &mut histories[current],
-                state,
-                &peers[current],
-                relay.as_mut(),
-            )?,
-            "/r" => receive_message(
-                paths,
-                password,
-                &mut histories[current],
-                state,
-                &peers[current],
-                relay.as_mut(),
-            )?,
-            "/receive" => receive_message(
-                paths,
-                password,
-                &mut histories[current],
-                state,
-                &peers[current],
-                relay.as_mut(),
-            )?,
+            "/send" => {
+                if let Err(error) = send_message(
+                    paths,
+                    password,
+                    &mut histories[current],
+                    state,
+                    &peers[current],
+                    relay.as_mut(),
+                ) {
+                    report_relay_operation_error(&error);
+                }
+            }
+            "/r" | "/receive" => {
+                if let Err(error) = receive_message(
+                    paths,
+                    password,
+                    &mut histories[current],
+                    state,
+                    &peers[current],
+                    relay.as_mut(),
+                ) {
+                    report_relay_operation_error(&error);
+                }
+            }
             "/peers" => list_peers(&peers, current)?,
             "/contacts" => {
                 let Some(runtime) = relay.as_mut() else {
@@ -1318,9 +1322,11 @@ fn receive_message(
     relay: Option<&mut RelayTransport>,
 ) -> Result<()> {
     if let Some(runtime) = relay {
-        let received = receive_relay(paths, password, history, state, peer, runtime)?;
-        if received == 0 {
+        let events = receive_relay(paths, password, history, state, peer, runtime)?;
+        if events.is_empty() {
             println!("No new relay messages for {}.", peer.address());
+        } else {
+            print_chat_events(&events, None)?;
         }
         return Ok(());
     }
@@ -1357,7 +1363,7 @@ fn receive_relay(
     state: &mut SqliteSignalState,
     peer: &SignalPreKeyBundle,
     runtime: &mut RelayTransport,
-) -> Result<usize> {
+) -> Result<Vec<ChatEvent>> {
     let relay_sender_id = runtime.sender_id_for(peer).map(str::to_owned);
     let mut history_store = EncryptedHistoryStore::new(&paths.lobby_histories, password);
     let events = {
@@ -1369,23 +1375,33 @@ fn receive_relay(
         );
         service.poll(history, peer, relay_sender_id.as_deref())?
     };
-    for event in &events {
-        match event {
+    Ok(events)
+}
+
+fn print_chat_events(events: &[ChatEvent], terminal: Option<&Term>) -> Result<()> {
+    for event in events {
+        let line = match event {
             ChatEvent::Read { timestamp, text } => {
-                println!("  [{}] you: {} [read]", format_timestamp(*timestamp), text);
+                format!("  [{}] you: {} [read]", format_timestamp(*timestamp), text)
             }
             ChatEvent::Received {
                 timestamp,
                 sender,
                 text,
-            } => println!("[{}] {}: {}", format_timestamp(*timestamp), sender, text),
+            } => format!("[{}] {}: {}", format_timestamp(*timestamp), sender, text),
             ChatEvent::Stale { transport_id } => {
-                println!("Discarding stale relay message {transport_id} after ratchet recovery.");
+                format!("Discarding stale relay message {transport_id} after ratchet recovery.")
             }
-            ChatEvent::Sent { .. } => {}
+            ChatEvent::Sent { .. } => continue,
+        };
+        if let Some(terminal) = terminal {
+            terminal.write_str("\r\x1b[2K")?;
+            terminal.write_str(&format!("{line}\r\n"))?;
+        } else {
+            println!("{line}");
         }
     }
-    Ok(events.len())
+    Ok(())
 }
 
 /// Read a relay-mode chat line while periodically checking for incoming mail.
@@ -1404,7 +1420,8 @@ fn read_relay_input(
     let term = Term::stdout();
     let _raw_mode = RawMode::new()?;
     let mut line = String::new();
-    term.write_str("> ")?;
+    let mut relay_unavailable = false;
+    term.write_str("\r> ")?;
     loop {
         match read_relay_key(&term)? {
             Some(Key::Char(character)) => {
@@ -1431,9 +1448,50 @@ fn read_relay_input(
             Some(_) | None => {}
         }
 
-        if receive_relay(paths, password, history, state, peer, runtime)? > 0 {
-            term.write_str(&format!("\r\x1b[2K> {line}"))?;
+        match receive_relay(paths, password, history, state, peer, runtime) {
+            Ok(events) => {
+                let mut redraw_prompt = false;
+                if relay_unavailable {
+                    term.write_str("\r\x1b[2K")?;
+                    term.write_line("Relay connection restored.")?;
+                    relay_unavailable = false;
+                    redraw_prompt = true;
+                }
+                if !events.is_empty() {
+                    print_chat_events(&events, Some(&term))?;
+                    redraw_prompt = true;
+                }
+                if redraw_prompt {
+                    term.write_str(&format!("\r\x1b[2K> {line}"))?;
+                }
+            }
+            Err(error) if is_temporary_relay_error(&error) => {
+                if !relay_unavailable {
+                    term.write_str("\r\x1b[2K")?;
+                    term.write_line("Relay unavailable; retrying in the background.")?;
+                    term.write_str(&format!("\r> {line}"))?;
+                    relay_unavailable = true;
+                }
+            }
+            Err(error) => return Err(error),
         }
+    }
+}
+
+fn is_temporary_relay_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    !message.contains("401 Unauthorized")
+        && !message.contains("403 Forbidden")
+        && (message.contains("relay request")
+            || message.contains("sending signed relay request")
+            || message.contains("reading relay response"))
+}
+
+fn report_relay_operation_error(error: &anyhow::Error) {
+    if is_temporary_relay_error(error) {
+        println!("Relay unavailable; operation will need to be retried when it is back.");
+    } else {
+        println!("Error: {error:#}");
     }
 }
 
@@ -1446,7 +1504,7 @@ fn read_relay_input_without_peer(
     let term = Term::stdout();
     let _raw_mode = RawMode::new()?;
     let mut line = String::new();
-    term.write_str("> ")?;
+    term.write_str("\r> ")?;
     loop {
         match read_relay_key(&term)? {
             Some(Key::Char(character)) => {
@@ -1481,7 +1539,7 @@ fn read_relay_input_without_peer(
                         "Incoming contact request from {} ({}) — use /contacts to review.",
                         request.sender_name, request.sender_id
                     ))?;
-                    term.write_str(&format!("> {line}"))?;
+                    term.write_str(&format!("\r> {line}"))?;
                 }
             }
         }

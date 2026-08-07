@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{Method, StatusCode, Url, header};
 use safechat_core::signal_adapter::SignalPreKeyBundle;
 use safechat_core::transport::{
@@ -16,12 +16,14 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use signal_protocol::IdentityKeyPair;
 use signal_rand::{Rng, TryRngCore, rngs::OsRng};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const REGISTER_DOMAIN: &[u8] = b"safechat-relay-register-v1\0";
 const REQUEST_DOMAIN: &[u8] = b"safechat-relay-request-v1\0";
 const ENROLLMENT_REQUEST_DOMAIN: &[u8] = b"safechat-relay-enrollment-request-v1\0";
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REQUEST_ATTEMPTS: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct RelayClientConfig {
@@ -140,16 +142,16 @@ impl RelayClient {
     }
 
     pub fn register(&mut self, bundle: &SignalPreKeyBundle) -> Result<RelayRegistration> {
-        let challenge: ChallengeResponse = self
-            .http
-            .post(self.url("/v1/devices/challenge")?)
-            .json(&json!({
-                "client_id": self.config.client_id,
-                "enrollment_secret": self.config.enrollment_secret,
-            }))
-            .send()
-            .context("requesting relay enrollment challenge")
-            .and_then(parse_json)?;
+        let challenge: ChallengeResponse = parse_json(send_with_retry(|| {
+            Ok(self
+                .http
+                .post(self.url("/v1/devices/challenge")?)
+                .json(&json!({
+                    "client_id": self.config.client_id,
+                    "enrollment_secret": self.config.enrollment_secret,
+                })))
+        })?)
+        .context("requesting relay enrollment challenge")?;
         let challenge = decode(&challenge.challenge)?;
         let bundle_bytes = bundle.encode()?;
         let device_address = bundle.address().to_string();
@@ -166,19 +168,19 @@ impl RelayClient {
             .private_key()
             .calculate_signature(&signed, &mut rng)?;
         let identity_key = self.identity_pair.identity_key().serialize();
-        let registration: RelayRegistration = self
-            .http
-            .post(self.url("/v1/devices/register")?)
-            .json(&json!({
-                "client_id": self.config.client_id,
-                "device_address": device_address,
-                "identity_key": encode(&identity_key),
-                "bundle": encode(&bundle_bytes),
-                "signature": encode(&signature),
-            }))
-            .send()
-            .context("registering device with relay")
-            .and_then(parse_json)?;
+        let registration: RelayRegistration = parse_json(send_with_retry(|| {
+            Ok(self
+                .http
+                .post(self.url("/v1/devices/register")?)
+                .json(&json!({
+                    "client_id": self.config.client_id,
+                    "device_address": device_address,
+                    "identity_key": encode(&identity_key),
+                    "bundle": encode(&bundle_bytes),
+                    "signature": encode(&signature),
+                })))
+        })?)
+        .context("registering device with relay")?;
         self.access_token = Some(registration.access_token.clone());
         Ok(registration)
     }
@@ -206,21 +208,21 @@ impl RelayClient {
             .identity_pair
             .private_key()
             .calculate_signature(&signed, &mut rng)?;
-        let response: EnrollmentResponse = self
-            .http
-            .post(self.url("/v1/devices/enrollment-requests")?)
-            .json(&json!({
-                "client_id": self.config.client_id,
-                "device_address": bundle.address().to_string(),
-                "identity_key": encode(&identity_key),
-                "fingerprint": fingerprint,
-                "bundle": encode(&bundle_bytes),
-                "enrollment_secret_hash": secret_hash,
-                "signature": encode(&signature),
-            }))
-            .send()
-            .context("submitting relay enrollment request")
-            .and_then(parse_json)?;
+        let response: EnrollmentResponse = parse_json(send_with_retry(|| {
+            Ok(self
+                .http
+                .post(self.url("/v1/devices/enrollment-requests")?)
+                .json(&json!({
+                    "client_id": self.config.client_id,
+                    "device_address": bundle.address().to_string(),
+                    "identity_key": encode(&identity_key),
+                    "fingerprint": fingerprint,
+                    "bundle": encode(&bundle_bytes),
+                    "enrollment_secret_hash": secret_hash,
+                    "signature": encode(&signature),
+                })))
+        })?)
+        .context("submitting relay enrollment request")?;
         Ok(response)
     }
 
@@ -395,38 +397,39 @@ impl RelayClient {
             .as_deref()
             .context("relay client is not registered")?;
         let signed_path = path.split('?').next().unwrap_or(path);
-        let nonce = random_nonce();
-        let timestamp = now();
-        let mut signed = REQUEST_DOMAIN.to_vec();
-        signed.extend(method.as_str().as_bytes());
-        signed.push(0);
-        signed.extend(signed_path.as_bytes());
-        signed.push(0);
-        signed.extend(Sha256::digest(&body));
-        signed.extend(nonce.as_bytes());
-        signed.push(0);
-        signed.extend(timestamp.to_be_bytes());
-        let mut rng = OsRng.unwrap_err();
-        let signature = self
-            .identity_pair
-            .private_key()
-            .calculate_signature(&signed, &mut rng)?;
-        let mut request = self
-            .http
-            .request(method, self.url(path)?)
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header("x-safechat-nonce", &nonce)
-            .header("x-safechat-timestamp", timestamp.to_string())
-            .header("x-safechat-signature", encode(&signature));
-        if !body.is_empty() {
-            request = request
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(body);
-        }
-        request
-            .send()
-            .context("sending signed relay request")
-            .and_then(parse_json)
+        let body_for_request = body.clone();
+        let method_for_request = method.clone();
+        parse_json(send_with_retry(|| {
+            let nonce = random_nonce();
+            let timestamp = now();
+            let mut signed = REQUEST_DOMAIN.to_vec();
+            signed.extend(method_for_request.as_str().as_bytes());
+            signed.push(0);
+            signed.extend(signed_path.as_bytes());
+            signed.push(0);
+            signed.extend(Sha256::digest(&body_for_request));
+            signed.extend(nonce.as_bytes());
+            signed.push(0);
+            signed.extend(timestamp.to_be_bytes());
+            let mut rng = OsRng.unwrap_err();
+            let signature = self
+                .identity_pair
+                .private_key()
+                .calculate_signature(&signed, &mut rng)?;
+            let mut request = self
+                .http
+                .request(method_for_request.clone(), self.url(path)?)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("x-safechat-nonce", &nonce)
+                .header("x-safechat-timestamp", timestamp.to_string())
+                .header("x-safechat-signature", encode(&signature));
+            if !body_for_request.is_empty() {
+                request = request
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body_for_request.clone());
+            }
+            Ok(request)
+        })?)
     }
 
     fn url(&self, path: &str) -> Result<Url> {
@@ -494,6 +497,44 @@ fn parse_json<T: DeserializeOwned>(response: Response) -> Result<T> {
         );
     }
     Ok(serde_json::from_slice(&body)?)
+}
+
+fn send_with_retry<F>(mut build: F) -> Result<Response>
+where
+    F: FnMut() -> Result<RequestBuilder>,
+{
+    for attempt in 0..MAX_REQUEST_ATTEMPTS {
+        let response = build()?.send();
+        match response {
+            Ok(response) if retryable_status(response.status()) => {
+                if attempt + 1 == MAX_REQUEST_ATTEMPTS {
+                    return Ok(response);
+                }
+                let _ = response.bytes();
+                thread::sleep(retry_delay(attempt));
+            }
+            Ok(response) => return Ok(response),
+            Err(error) if attempt + 1 < MAX_REQUEST_ATTEMPTS => {
+                thread::sleep(retry_delay(attempt));
+                let _ = error;
+            }
+            Err(error) => {
+                return Err(error).context("relay request failed after retries");
+            }
+        }
+    }
+    unreachable!("relay retry loop always returns")
+}
+
+fn retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_EARLY
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(250u64.saturating_mul(1u64 << attempt.min(3)))
 }
 
 fn encode(bytes: &[u8]) -> String {
@@ -573,5 +614,16 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
         );
+    }
+
+    #[test]
+    fn retry_policy_only_retries_transient_failures() {
+        assert!(retryable_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!retryable_status(StatusCode::NOT_FOUND));
+        assert_eq!(retry_delay(0), Duration::from_millis(250));
+        assert_eq!(retry_delay(3), Duration::from_millis(2_000));
     }
 }
