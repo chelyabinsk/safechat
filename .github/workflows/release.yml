@@ -59,10 +59,12 @@ jobs:
         run: brew install protobuf
 
       - name: Build release binary
+        working-directory: codebase
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package binary
         shell: bash
+        working-directory: codebase
         env:
           TARGET: ${{ matrix.target }}
           ARCHIVE: ${{ matrix.archive }}
@@ -81,7 +83,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: safechat-${{ matrix.target }}
-          path: dist/*
+          path: codebase/dist/*
           if-no-files-found: error
 
   relay-image:

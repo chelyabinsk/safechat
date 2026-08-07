@@ -2794,7 +2794,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safechat"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "safechat-application"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "safechat-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "age",
  "anyhow",
@@ -2844,7 +2844,7 @@ dependencies = [
 
 [[package]]
 name = "safechat-relay"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2866,7 +2866,7 @@ dependencies = [
 
 [[package]]
 name = "safechat-transports"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
