@@ -153,7 +153,6 @@ struct RegisterRequest {
 
 #[derive(Deserialize)]
 struct EnrollmentRequest {
-    client_id: String,
     device_address: String,
     identity_key: String,
     fingerprint: String,
@@ -162,7 +161,7 @@ struct EnrollmentRequest {
     signature: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct EnrollmentResponse {
     accepted: bool,
     client_id: String,
@@ -515,9 +514,7 @@ async fn enrollment_request(
     State(state): State<AppState>,
     axum::Json(request): axum::Json<EnrollmentRequest>,
 ) -> Result<axum::Json<EnrollmentResponse>, ApiError> {
-    if request.client_id.is_empty()
-        || request.client_id.len() > 128
-        || request.device_address.len() > 256
+    if request.device_address.len() > 256
         || request.fingerprint.len() > 256
         || request.enrollment_secret_hash.len() != 64
         || request.bundle.len() > MAX_BODY
@@ -531,8 +528,6 @@ async fn enrollment_request(
         .map_err(|_| bad_request(anyhow::anyhow!("invalid identity key")))?;
     let bundle = b64decode(&request.bundle).map_err(bad_request)?;
     let mut signed = ENROLLMENT_REQUEST_DOMAIN.to_vec();
-    signed.extend(request.client_id.as_bytes());
-    signed.push(0);
     signed.extend(request.device_address.as_bytes());
     signed.push(0);
     signed.extend(request.fingerprint.as_bytes());
@@ -546,13 +541,17 @@ async fn enrollment_request(
     }
     let expires_at = now().saturating_add(900);
     let db = state.db.lock().await;
+    let client_id = format!(
+        "sc-{}",
+        URL_SAFE_NO_PAD.encode(&Sha256::digest(identity.serialize().as_ref())[..12])
+    );
     db.execute(
         "INSERT OR REPLACE INTO enrollment_requests
          (client_id, device_address, identity_key, fingerprint, bundle,
           enrollment_secret_hash, created_at, expires_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
-            request.client_id,
+            client_id,
             request.device_address,
             identity_bytes,
             request.fingerprint,
@@ -565,7 +564,7 @@ async fn enrollment_request(
     .map_err(internal)?;
     Ok(axum::Json(EnrollmentResponse {
         accepted: true,
-        client_id: request.client_id,
+        client_id,
         expires_at,
     }))
 }
@@ -902,10 +901,26 @@ async fn send_message(
     let accepted_at = now();
     let result = db.execute("INSERT OR IGNORE INTO messages(sender, recipient, client_message_id, ciphertext, accepted_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![sender, recipient_id, request.message_id, ciphertext, accepted_at as i64, request.expires_at.map(|x| x as i64)]).map_err(internal)?;
     if result == 0 {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "message already submitted".into(),
-        ));
+        let existing = db
+            .query_row(
+                "SELECT messages.server_id, messages.sender, devices.device_address, messages.client_message_id, messages.ciphertext, messages.accepted_at, messages.expires_at FROM messages LEFT JOIN devices ON devices.client_id = messages.sender WHERE messages.sender = ?1 AND messages.recipient = ?2 AND messages.client_message_id = ?3",
+                params![sender, recipient_id, request.message_id],
+                |row| {
+                    Ok(MessageResponse {
+                        server_id: row.get(0)?,
+                        sender: row.get(1)?,
+                        sender_address: row.get(2)?,
+                        message_id: row.get(3)?,
+                        ciphertext: b64(&row.get::<_, Vec<u8>>(4)?),
+                        accepted_at: row.get::<_, i64>(5)? as u64,
+                        expires_at: row.get::<_, Option<i64>>(6)?.map(|x| x as u64),
+                    })
+                },
+            )
+            .optional()
+            .map_err(internal)?
+            .ok_or_else(not_found)?;
+        return Ok(axum::Json(existing));
     }
     let id = db.last_insert_rowid();
     Ok(axum::Json(MessageResponse {
@@ -1429,6 +1444,58 @@ mod tests {
         assert_eq!(stored.0, hash("secret"));
         assert_eq!(stored.1, "active");
         assert_eq!(stored.2, 0);
+    }
+
+    #[tokio::test]
+    async fn enrollment_request_gets_a_server_assigned_client_id() {
+        let database = test_database();
+        let mut rng = rand::rng();
+        let identity = IdentityKeyPair::generate(&mut rng);
+        let identity_bytes = identity.identity_key().serialize();
+        let device_address = "Alice.1";
+        let fingerprint = "fingerprint-a";
+        let secret_hash = hash("secret");
+        let bundle = b"bundle";
+        let mut signed = ENROLLMENT_REQUEST_DOMAIN.to_vec();
+        signed.extend(device_address.as_bytes());
+        signed.push(0);
+        signed.extend(fingerprint.as_bytes());
+        signed.push(0);
+        signed.extend(secret_hash.as_bytes());
+        signed.push(0);
+        signed.extend(Sha256::digest(bundle));
+        let signature = identity
+            .private_key()
+            .calculate_signature(&signed, &mut rng)
+            .unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(database)),
+            admin_token: None,
+        };
+        let response = router(state)
+            .oneshot(
+                Request::post("/v1/devices/enrollment-requests")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&json!({
+                            "device_address": device_address,
+                            "identity_key": b64(&identity_bytes),
+                            "fingerprint": fingerprint,
+                            "bundle": b64(bundle),
+                            "enrollment_secret_hash": secret_hash,
+                            "signature": b64(&signature),
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let enrollment: EnrollmentResponse = serde_json::from_slice(&body).unwrap();
+        assert!(enrollment.accepted);
+        assert!(enrollment.client_id.starts_with("sc-"));
     }
 
     #[test]

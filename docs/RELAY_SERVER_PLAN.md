@@ -16,9 +16,10 @@ to client private keys or message plaintext.
 ## 1.1 Initial implementation decisions
 
 - Allowlist administration is performed through a server CLI.
-- Each client generates its own random client ID and one-time enrollment secret.
-- The administrator enters the client ID, fingerprint, and enrollment secret
-  through the CLI.
+- The relay assigns each enrolled device a stable client ID; the client
+  generates only the one-time enrollment secret.
+- The administrator reviews the server-assigned ID and fingerprint through the
+  CLI.
 - SQLite is the initial relay database.
 - The standalone relay terminates native TLS directly.
 - Every authenticated API request carries a client identity-key signature,
@@ -413,13 +414,12 @@ client by claiming the ID in a request.
 Knowing the client ID alone must never be sufficient to connect. Use a standard
 device-enrollment pattern with a separate high-entropy secret:
 
-1. Client generates a random client ID and a random, single-use enrollment
-   secret, or the administrator generates the enrollment secret for a pending
-   allowlist slot.
+1. Client generates a random, single-use enrollment secret. The relay assigns
+   the client ID when it accepts the signed enrollment request.
 2. The enrollment secret is delivered to the intended client through a secure
    administrative channel, such as a QR code or direct copy/paste.
-3. Client submits client ID, enrollment secret, public identity key, and a
-   signed server challenge.
+3. Client submits the enrollment secret hash, public identity key, and a
+   signed enrollment request without choosing the client ID.
 4. Server verifies the secret and identity-key signature, consumes the secret,
    and binds the ID to the approved public key.
 5. Server issues revocable session credentials for future API access.

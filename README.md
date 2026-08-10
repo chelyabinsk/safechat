@@ -65,7 +65,7 @@ After `/send`, copy the complete ciphertext shown in the UI and send it through
 your separate channel. Use `/receive` and choose `Paste ciphertext` to receive
 one. `/bundle` similarly displays the current public bundle for copy/paste.
 
-Use `/add-peer` to create another private lobby, `/peers` to list participants,
+Use `/add-contact` to create another private lobby, `/peers` to list participants,
 and `/use NAME` to switch the active lobby. Messages are sent only to the
 currently selected peer.
 
@@ -75,8 +75,7 @@ Start the UI with the relay URL:
 
 ```sh
 docker compose run --rm rust-dev cargo run --locked --bin safechat-ui -- \
-  --relay-url https://relay.example \
-  --relay-enrollment-secret '<one-time-secret>'
+  --relay-url https://relay.example
 ```
 
 For a trusted/private network, the relay URL may use `http://`. The UI asks
@@ -86,13 +85,13 @@ are exposed to network observers. Do not use HTTP for a public relay or over
 an untrusted network.
 
 For a local test relay using a self-signed certificate, add
-`--relay-ca-cert /path/to/ca.pem`. On first launch the UI registers the
-device and stores the resulting relay session token and relay configuration
-encrypted with the profile password. If `--relay-client-id` is omitted, the UI
-generates a stable client ID from the local identity and submits a signed
-enrollment request. The UI waits for administrator approval and retries
-enrollment without restarting. The enrollment secret is retained only inside
-the encrypted profile configuration.
+`--relay-ca-cert /path/to/ca.pem`. For `http://` relays, the UI does not ask
+for a CA certificate. On first launch the UI submits a signed enrollment
+request; the relay generates and returns the client ID. The UI generates the
+high-entropy one-time enrollment secret automatically and stores it only inside
+the encrypted profile configuration. It then stores the resulting relay
+session token, waits for administrator approval, and retries enrollment without
+restarting.
 
 At startup, choose Copy/paste or Relay. With Relay selected, the client submits
 its signed enrollment request automatically when the administrator has not yet

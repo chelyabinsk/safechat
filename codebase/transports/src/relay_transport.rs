@@ -7,15 +7,23 @@ use safechat_core::transport::{
     ContactRequest, ContactTransport, DeliveryStatus, MessageTransport, TransportMessage,
 };
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+const PEER_BUNDLE_CACHE_TTL: Duration = Duration::from_secs(60);
 
 pub struct RelayTransport {
     client: RelayClient,
     peer_ids: HashMap<String, String>,
+    peer_bundles: HashMap<String, (Instant, SignalPreKeyBundle)>,
 }
 
 impl RelayTransport {
     pub fn new(client: RelayClient, peer_ids: HashMap<String, String>) -> Self {
-        Self { client, peer_ids }
+        Self {
+            client,
+            peer_ids,
+            peer_bundles: HashMap::new(),
+        }
     }
 
     pub fn base_url(&self) -> &str {
@@ -50,21 +58,34 @@ impl RelayTransport {
     }
 
     pub fn fetch_peer_bundle(&mut self, peer: &SignalPreKeyBundle) -> Result<SignalPreKeyBundle> {
+        let peer_address = peer.address().to_string();
+        if let Some((fetched_at, bundle)) = self.peer_bundles.get(&peer_address)
+            && fetched_at.elapsed() < PEER_BUNDLE_CACHE_TTL
+        {
+            return Ok(bundle.clone());
+        }
         let relay_bundle = if let Some(relay_id) = self.peer_ids.get(&peer.name) {
             self.client.fetch_bundle(relay_id)?
         } else {
-            self.client.fetch_bundle(&peer.address().to_string())?
+            self.client.fetch_bundle(&peer_address)?
         };
         let fetched = RelayClient::decode_bundle(&relay_bundle)?;
         if fetched.address() != peer.address() || fetched.identity_key()? != peer.identity_key()? {
             bail!("relay peer bundle does not match the locally verified identity");
         }
+        self.peer_bundles
+            .insert(peer_address, (Instant::now(), fetched.clone()));
         Ok(fetched)
     }
 
     pub fn fetch_peer_bundle_by_id(&mut self, client_id: &str) -> Result<SignalPreKeyBundle> {
         let relay_bundle = self.client.fetch_bundle(client_id)?;
-        RelayClient::decode_bundle(&relay_bundle)
+        let fetched = RelayClient::decode_bundle(&relay_bundle)?;
+        self.peer_bundles.insert(
+            fetched.address().to_string(),
+            (Instant::now(), fetched.clone()),
+        );
+        Ok(fetched)
     }
 
     pub fn accepted_contacts(&mut self) -> Result<Vec<ContactRequest>> {

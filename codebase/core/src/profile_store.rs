@@ -4,6 +4,7 @@
 //! and transport session metadata. It deliberately does not know about the
 //! UI, Signal sessions, or any particular transport implementation.
 
+use age::secrecy::ExposeSecret;
 use age::{Decryptor, Encryptor};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,8 @@ pub const PROFILE_VERSION: u32 = 1;
 pub struct HistoryFile {
     pub version: u32,
     pub entries: Vec<HistoryEntry>,
+    #[serde(default)]
+    pub transport_cursor: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,6 +36,8 @@ pub struct HistoryEntry {
     pub ciphertext: String,
     #[serde(default)]
     pub delivery_status: String,
+    #[serde(default)]
+    pub transport_recipient: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,14 +59,20 @@ pub trait HistoryStore {
 pub struct EncryptedHistoryStore {
     root: PathBuf,
     password: String,
+    identity: age::x25519::Identity,
 }
 
 impl EncryptedHistoryStore {
-    pub fn new(root: impl Into<PathBuf>, password: impl Into<String>) -> Self {
-        Self {
-            root: root.into(),
-            password: password.into(),
-        }
+    pub fn new(root: impl Into<PathBuf>, password: impl Into<String>) -> Result<Self> {
+        let root = root.into();
+        let password = password.into();
+        fs::create_dir_all(&root)?;
+        let identity = load_or_create_history_identity(&root, &password)?;
+        Ok(Self {
+            root,
+            password,
+            identity,
+        })
     }
 
     fn path_for(&self, conversation: &str) -> PathBuf {
@@ -85,7 +96,7 @@ impl HistoryStore for EncryptedHistoryStore {
     }
 
     fn save(&mut self, conversation: &str, history: &HistoryFile) -> Result<()> {
-        save_history(&self.path_for(conversation), &self.password, history)
+        save_history_with_identity(&self.path_for(conversation), &self.identity, history)
     }
 }
 
@@ -94,9 +105,10 @@ pub fn load_history(path: &Path, password: &str) -> Result<HistoryFile> {
         return Ok(HistoryFile {
             version: PROFILE_VERSION,
             entries: Vec::new(),
+            transport_cursor: 0,
         });
     }
-    let mut plaintext = decrypt_file(path, password)?;
+    let mut plaintext = decrypt_history_file(path, password)?;
     let history: HistoryFile = serde_json::from_slice(&plaintext)?;
     plaintext.fill(0);
     if history.version != PROFILE_VERSION {
@@ -111,6 +123,31 @@ pub fn save_history(path: &Path, password: &str, history: &HistoryFile) -> Resul
         .context("chat history has no parent directory")?;
     fs::create_dir_all(parent)?;
     save_encrypted(path, password, &serde_json::to_vec(history)?)
+}
+
+fn save_history_with_identity(
+    path: &Path,
+    identity: &age::x25519::Identity,
+    history: &HistoryFile,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("chat history has no parent directory")?;
+    fs::create_dir_all(parent)?;
+    let temporary = path.with_extension("age.tmp");
+    remove_stale_temporary(&temporary)?;
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .with_context(|| format!("creating temporary encrypted file {}", temporary.display()))?;
+    let recipient = identity.to_public();
+    let encryptor = Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
+    let mut writer = encryptor.wrap_output(file)?;
+    writer.write_all(&serde_json::to_vec(history)?)?;
+    writer.finish()?;
+    fs::rename(temporary, path)?;
+    restrict_file(path)
 }
 
 pub fn load_relay_token(path: &Path, password: &str) -> Result<String> {
@@ -162,6 +199,56 @@ fn decrypt_file(path: &Path, password: &str) -> Result<Vec<u8>> {
     let mut plaintext = Vec::new();
     reader.read_to_end(&mut plaintext)?;
     Ok(plaintext)
+}
+
+fn decrypt_file_with_identity(path: &Path, identity: &age::x25519::Identity) -> Result<Vec<u8>> {
+    let input = File::open(path)?;
+    let decryptor = Decryptor::new(input)?;
+    let mut reader = decryptor.decrypt(std::iter::once(identity as &dyn age::Identity))?;
+    let mut plaintext = Vec::new();
+    reader.read_to_end(&mut plaintext)?;
+    Ok(plaintext)
+}
+
+fn history_key_path(root: &Path) -> PathBuf {
+    root.join(".history-key.age")
+}
+
+fn load_or_create_history_identity(root: &Path, password: &str) -> Result<age::x25519::Identity> {
+    let path = history_key_path(root);
+    if path.exists() {
+        let encoded = String::from_utf8(decrypt_file(&path, password)?)?;
+        return encoded
+            .trim()
+            .parse()
+            .map_err(|error| anyhow::anyhow!("invalid encrypted history key: {error}"));
+    }
+    let identity = age::x25519::Identity::generate();
+    let encoded = identity.to_string();
+    save_encrypted(&path, password, encoded.expose_secret().as_bytes())?;
+    Ok(identity)
+}
+
+fn decrypt_history_file(path: &Path, password: &str) -> Result<Vec<u8>> {
+    match decrypt_file(path, password) {
+        Ok(plaintext) => Ok(plaintext),
+        Err(passphrase_error) => {
+            let Some(root) = path.parent() else {
+                return Err(passphrase_error);
+            };
+            let key_path = history_key_path(root);
+            if !key_path.exists() {
+                return Err(passphrase_error);
+            }
+            let identity = load_or_create_history_identity(root, password)?;
+            decrypt_file_with_identity(path, &identity).with_context(|| {
+                format!(
+                    "decrypting history {} with the profile history key",
+                    path.display()
+                )
+            })
+        }
+    }
 }
 
 fn save_encrypted(path: &Path, password: &str, plaintext: &[u8]) -> Result<()> {

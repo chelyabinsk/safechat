@@ -75,10 +75,10 @@ The container is named safechat-relay and listens on port 8443.
       --relay-url https://127.0.0.1:8443 \
       --relay-ca-cert "$SAFECHAT_RELAY_TLS_DIR/fullchain.pem"
 
-Choose Relay, initialize Alice, and enter an enrollment secret such as
-alice-local-secret. Enrollment will initially be pending. Copy Alice's
-displayed client ID, identity key, and fingerprint. Leave Alice at the retry
-prompt.
+Choose Relay and initialize Alice. The client generates its one-time
+enrollment secret automatically. The relay assigns Alice's client ID when the
+enrollment request is submitted. Copy that ID and fingerprint. Leave Alice at
+the retry prompt.
 
 ## 5. Start Bob
 
@@ -88,45 +88,38 @@ prompt.
       --relay-url https://127.0.0.1:8443 \
       --relay-ca-cert "$SAFECHAT_RELAY_TLS_DIR/fullchain.pem"
 
-Choose Relay, initialize Bob, and enter bob-local-secret. Copy Bob's
-displayed client ID, identity key, and fingerprint. Leave Bob at the retry
-prompt.
+Choose Relay and initialize Bob. Copy the server-assigned client ID and
+fingerprint, then leave Bob at the retry prompt.
 
-## 6. Add Alice through the running relay
+## 6. Inspect and approve both enrollments
 
-Replace the uppercase placeholders:
-
-    docker exec safechat-relay \
-      safechat-relay allowlist-add-remote \
-      --url https://127.0.0.1:8443 \
-      --ca-cert /etc/safechat-relay/tls/fullchain.pem \
-      --client-id 'ALICE_CLIENT_ID' \
-      --identity-key 'ALICE_IDENTITY_KEY' \
-      --fingerprint 'ALICE_FINGERPRINT' \
-      --enrollment-secret 'alice-local-secret' \
-      --label Alice
-
-## 7. Add Bob through the running relay
+From a separate administrator terminal:
 
     docker exec safechat-relay \
-      safechat-relay allowlist-add-remote \
-      --url https://127.0.0.1:8443 \
-      --ca-cert /etc/safechat-relay/tls/fullchain.pem \
-      --client-id 'BOB_CLIENT_ID' \
-      --identity-key 'BOB_IDENTITY_KEY' \
-      --fingerprint 'BOB_FINGERPRINT' \
-      --enrollment-secret 'bob-local-secret' \
-      --label Bob
+      safechat-relay enrollment-pending \
+      --database /var/lib/safechat-relay/relay.db
+
+Review the displayed fingerprints, then approve each server-assigned ID:
+
+    docker exec safechat-relay \
+      safechat-relay enrollment-approve \
+      --database /var/lib/safechat-relay/relay.db \
+      --client-id 'ALICE_CLIENT_ID'
+
+    docker exec safechat-relay \
+      safechat-relay enrollment-approve \
+      --database /var/lib/safechat-relay/relay.db \
+      --client-id 'BOB_CLIENT_ID'
 
 The admin token is inherited by the CLI inside the container. The relay does
 not need to be restarted.
 
-Use the exact generated client IDs when enrolling or adding peers. The UI may
+Use the exact server-assigned client IDs when adding peers. The UI may
 display a peer as `Alice (Alice.1)`: `Alice` is the display name, while
 `Alice.1` is the Signal identity address. The updated client handles this
 mapping automatically after restart.
 
-## 8. Complete enrollment
+## 7. Complete enrollment
 
 Return to Alice and Bob and answer Yes at the retry prompt. After both report
 Relay transport enabled, each client will request the peer's relay client ID:
@@ -140,7 +133,7 @@ Confirm the displayed fingerprints. Check the mode with:
 
 It should report Transport: Relay.
 
-## 9. Test communication
+## 8. Test communication
 
 In relay mode, type ordinary text in Alice; it is sent automatically:
 

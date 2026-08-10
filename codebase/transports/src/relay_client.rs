@@ -141,6 +141,10 @@ impl RelayClient {
         &self.config.client_id
     }
 
+    pub fn set_client_id(&mut self, client_id: String) {
+        self.config.client_id = client_id;
+    }
+
     pub fn register(&mut self, bundle: &SignalPreKeyBundle) -> Result<RelayRegistration> {
         let challenge: ChallengeResponse = parse_json(send_with_retry(|| {
             Ok(self
@@ -186,7 +190,7 @@ impl RelayClient {
     }
 
     pub fn submit_enrollment_request(
-        &self,
+        &mut self,
         bundle: &SignalPreKeyBundle,
         fingerprint: &str,
     ) -> Result<EnrollmentResponse> {
@@ -194,8 +198,6 @@ impl RelayClient {
         let identity_key = self.identity_pair.identity_key().serialize();
         let secret_hash = hash(&self.config.enrollment_secret);
         let mut signed = ENROLLMENT_REQUEST_DOMAIN.to_vec();
-        signed.extend(self.config.client_id.as_bytes());
-        signed.push(0);
         signed.extend(bundle.address().to_string().as_bytes());
         signed.push(0);
         signed.extend(fingerprint.as_bytes());
@@ -213,7 +215,6 @@ impl RelayClient {
                 .http
                 .post(self.url("/v1/devices/enrollment-requests")?)
                 .json(&json!({
-                    "client_id": self.config.client_id,
                     "device_address": bundle.address().to_string(),
                     "identity_key": encode(&identity_key),
                     "fingerprint": fingerprint,
@@ -223,6 +224,7 @@ impl RelayClient {
                 })))
         })?)
         .context("submitting relay enrollment request")?;
+        self.set_client_id(response.client_id.clone());
         Ok(response)
     }
 

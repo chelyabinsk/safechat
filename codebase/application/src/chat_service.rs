@@ -57,19 +57,31 @@ impl<'a> ChatService<'a> {
     ) -> Result<ChatEvent> {
         let (message_id, envelope) =
             futures_executor::block_on(self.state.encrypt_message_for(encryption_peer, plaintext))?;
-        self.transport
-            .send(recipient, &message_id.encode(), &envelope, None)?;
+        let message_id = message_id.encode();
         let timestamp = now();
         let text = String::from_utf8_lossy(plaintext).into_owned();
         history.entries.push(HistoryEntry {
             timestamp,
             sender: "you".to_owned(),
             text: text.clone(),
-            message_id: message_id.encode(),
+            message_id: message_id.clone(),
             peer: peer.address().to_string(),
             ciphertext: TextTransport.encode(&envelope).trim().to_owned(),
-            delivery_status: "sent".to_owned(),
+            delivery_status: "queued".to_owned(),
+            transport_recipient: recipient.to_owned(),
         });
+        // Persist before submission so an accepted message can be retried with
+        // the same authenticated message ID after a process crash.
+        self.history_store.save(&self.conversation, history)?;
+        self.transport
+            .send(recipient, &message_id, &envelope, None)?;
+        if let Some(entry) = history
+            .entries
+            .iter_mut()
+            .find(|entry| entry.message_id == message_id)
+        {
+            entry.delivery_status = "sent".to_owned();
+        }
         self.history_store.save(&self.conversation, history)?;
         Ok(ChatEvent::Sent { timestamp, text })
     }
@@ -101,8 +113,42 @@ impl<'a> ChatService<'a> {
             self.history_store.save(&self.conversation, history)?;
         }
 
+        // Retry durable outbox entries. A transport must treat repeated
+        // submission of the same message ID as idempotent.
+        let queued = history
+            .entries
+            .iter()
+            .filter(|entry| entry.sender == "you" && entry.delivery_status == "queued")
+            .map(|entry| {
+                (
+                    entry.message_id.clone(),
+                    entry.transport_recipient.clone(),
+                    entry.ciphertext.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (message_id, recipient, ciphertext) in queued {
+            let Ok(envelope) = TextTransport.decode(&ciphertext) else {
+                continue;
+            };
+            if self
+                .transport
+                .send(&recipient, &message_id, &envelope, None)
+                .is_ok()
+            {
+                if let Some(entry) = history
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.message_id == message_id)
+                {
+                    entry.delivery_status = "sent".to_owned();
+                }
+                self.history_store.save(&self.conversation, history)?;
+            }
+        }
+
         let peer_address = peer.address().to_string();
-        for message in self.transport.receive(0)? {
+        for message in self.transport.receive(history.transport_cursor)? {
             let sender_matches_address =
                 message.sender_address.as_deref() == Some(peer_address.as_str());
             let sender_matches_transport_id =
@@ -117,6 +163,7 @@ impl<'a> ChatService<'a> {
                 Ok(decoded) => decoded,
                 Err(error) if error.to_string().contains("old counter") => {
                     self.transport.acknowledge(&message)?;
+                    history_changed |= self.advance_cursor(history, &message.transport_id);
                     events.push(ChatEvent::Stale {
                         transport_id: message.transport_id,
                     });
@@ -141,6 +188,7 @@ impl<'a> ChatService<'a> {
                     peer: peer.address().to_string(),
                     ciphertext: TextTransport.encode(&message.ciphertext).trim().to_owned(),
                     delivery_status: "received".to_owned(),
+                    transport_recipient: String::new(),
                 });
                 self.history_store.save(&self.conversation, history)?;
                 events.push(ChatEvent::Received {
@@ -150,8 +198,21 @@ impl<'a> ChatService<'a> {
                 });
             }
             self.transport.acknowledge(&message)?;
+            history_changed |= self.advance_cursor(history, &message.transport_id);
+        }
+        if history_changed {
+            self.history_store.save(&self.conversation, history)?;
         }
         Ok(events)
+    }
+
+    fn advance_cursor(&self, history: &mut HistoryFile, transport_id: &str) -> bool {
+        if let Ok(cursor) = transport_id.parse::<i64>() {
+            let previous = history.transport_cursor;
+            history.transport_cursor = history.transport_cursor.max(cursor);
+            return history.transport_cursor != previous;
+        }
+        false
     }
 }
 
@@ -160,4 +221,222 @@ fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use safechat_core::profile_store::{HistoryStore, PROFILE_VERSION};
+    use safechat_core::transport::TransportMessage;
+    use std::path::PathBuf;
+
+    struct MemoryHistoryStore {
+        saves: Vec<HistoryFile>,
+    }
+
+    impl HistoryStore for MemoryHistoryStore {
+        fn load(&mut self, _conversation: &str) -> Result<HistoryFile> {
+            Ok(self.saves.last().cloned().unwrap_or(HistoryFile {
+                version: PROFILE_VERSION,
+                entries: Vec::new(),
+                transport_cursor: 0,
+            }))
+        }
+
+        fn save(&mut self, _conversation: &str, history: &HistoryFile) -> Result<()> {
+            self.saves.push(history.clone());
+            Ok(())
+        }
+    }
+
+    struct TestTransport {
+        fail_send: bool,
+        sent: Vec<(String, String, Vec<u8>)>,
+        incoming: Vec<TransportMessage>,
+        receive_cursors: Vec<i64>,
+        acknowledgements: Vec<String>,
+    }
+
+    impl MessageTransport for TestTransport {
+        fn send(
+            &mut self,
+            recipient: &str,
+            message_id: &str,
+            ciphertext: &[u8],
+            _expires_at: Option<u64>,
+        ) -> Result<()> {
+            if self.fail_send {
+                anyhow::bail!("transport unavailable")
+            }
+            self.sent.push((
+                recipient.to_owned(),
+                message_id.to_owned(),
+                ciphertext.to_vec(),
+            ));
+            Ok(())
+        }
+
+        fn receive(&mut self, cursor: i64) -> Result<Vec<TransportMessage>> {
+            self.receive_cursors.push(cursor);
+            Ok(self.incoming.clone())
+        }
+
+        fn acknowledge(&mut self, message: &TransportMessage) -> Result<()> {
+            self.acknowledgements.push(message.transport_id.clone());
+            Ok(())
+        }
+
+        fn status(&mut self, _message_id: &str) -> Result<DeliveryStatus> {
+            Ok(DeliveryStatus::Sent)
+        }
+    }
+
+    fn test_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "safechat-application-{label}-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn queued_send_retries_with_the_same_message_id() {
+        let (mut alice, bob_bundle, alice_path, bob_path) = futures_executor::block_on(async {
+            let alice_path = test_path("queued-send-alice");
+            let bob_path = test_path("queued-send-bob");
+            let mut alice = SqliteSignalState::initialize(&alice_path, "alice", 1, "password")
+                .await
+                .unwrap();
+            let mut bob = SqliteSignalState::initialize(&bob_path, "bob", 1, "password")
+                .await
+                .unwrap();
+            alice.export_bundle().await.unwrap();
+            let bob_bundle = bob.export_bundle().await.unwrap();
+            alice.trust_bundle(&bob_bundle).await.unwrap();
+            (alice, bob_bundle, alice_path, bob_path)
+        });
+
+        let mut transport = TestTransport {
+            fail_send: true,
+            sent: Vec::new(),
+            incoming: Vec::new(),
+            receive_cursors: Vec::new(),
+            acknowledgements: Vec::new(),
+        };
+        let mut store = MemoryHistoryStore { saves: Vec::new() };
+        let mut history = HistoryFile {
+            version: PROFILE_VERSION,
+            entries: Vec::new(),
+            transport_cursor: 0,
+        };
+        let result = ChatService::new(
+            &mut alice,
+            &mut transport,
+            &mut store,
+            bob_bundle.address().to_string(),
+        )
+        .send_text(
+            &mut history,
+            &bob_bundle,
+            &bob_bundle,
+            "bob-client",
+            b"hello",
+        );
+        assert!(result.is_err());
+        assert_eq!(history.entries[0].delivery_status, "queued");
+        let message_id = history.entries[0].message_id.clone();
+
+        transport.fail_send = false;
+        ChatService::new(
+            &mut alice,
+            &mut transport,
+            &mut store,
+            bob_bundle.address().to_string(),
+        )
+        .poll(&mut history, &bob_bundle, None)
+        .unwrap();
+        assert_eq!(history.entries[0].delivery_status, "sent");
+        assert_eq!(transport.sent.len(), 1);
+        assert_eq!(transport.sent[0].1, message_id);
+
+        drop(alice);
+        let _ = std::fs::remove_file(alice_path);
+        let _ = std::fs::remove_file(bob_path);
+    }
+
+    #[test]
+    fn receive_ack_persists_cursor_and_suppresses_duplicate_delivery() {
+        let (mut alice, bob_bundle, envelope, alice_path, bob_path) =
+            futures_executor::block_on(async {
+                let alice_path = test_path("receive-cursor-alice");
+                let bob_path = test_path("receive-cursor-bob");
+                let mut alice = SqliteSignalState::initialize(&alice_path, "alice", 1, "password")
+                    .await
+                    .unwrap();
+                let mut bob = SqliteSignalState::initialize(&bob_path, "bob", 1, "password")
+                    .await
+                    .unwrap();
+                let alice_bundle = alice.export_bundle().await.unwrap();
+                let bob_bundle = bob.export_bundle().await.unwrap();
+                alice.trust_bundle(&bob_bundle).await.unwrap();
+                bob.trust_bundle(&alice_bundle).await.unwrap();
+                let (_, envelope) = bob
+                    .encrypt_message_for(&alice_bundle, b"incoming")
+                    .await
+                    .unwrap();
+                (alice, bob_bundle, envelope, alice_path, bob_path)
+            });
+        let incoming = TransportMessage {
+            transport_id: "42".to_owned(),
+            sender: "bob-client".to_owned(),
+            sender_address: Some(bob_bundle.address().to_string()),
+            message_id: String::new(),
+            ciphertext: envelope,
+            accepted_at: 1,
+            expires_at: None,
+        };
+        let mut transport = TestTransport {
+            fail_send: false,
+            sent: Vec::new(),
+            incoming: vec![incoming],
+            receive_cursors: Vec::new(),
+            acknowledgements: Vec::new(),
+        };
+        let mut store = MemoryHistoryStore { saves: Vec::new() };
+        let mut history = HistoryFile {
+            version: PROFILE_VERSION,
+            entries: Vec::new(),
+            transport_cursor: 0,
+        };
+        let events = ChatService::new(
+            &mut alice,
+            &mut transport,
+            &mut store,
+            bob_bundle.address().to_string(),
+        )
+        .poll(&mut history, &bob_bundle, Some("bob-client"))
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(history.transport_cursor, 42);
+        assert_eq!(transport.acknowledgements, vec!["42"]);
+
+        let events = ChatService::new(
+            &mut alice,
+            &mut transport,
+            &mut store,
+            bob_bundle.address().to_string(),
+        )
+        .poll(&mut history, &bob_bundle, Some("bob-client"))
+        .unwrap();
+        assert!(matches!(events.as_slice(), [ChatEvent::Stale { .. }]));
+        assert_eq!(transport.receive_cursors, vec![0, 42]);
+        assert_eq!(history.entries.len(), 1);
+
+        drop(alice);
+        let _ = std::fs::remove_file(alice_path);
+        let _ = std::fs::remove_file(bob_path);
+    }
 }
