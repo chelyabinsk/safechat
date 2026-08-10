@@ -1,10 +1,65 @@
 # SafeChat
 
-SafeChat is a Rust protocol prototype using the pinned upstream Signal
-implementation. Carrier adapters and steganography are separate evaluation
-components; no custom cryptographic protocol is shipped.
+SafeChat is an early-stage Rust project for encrypted conversations that can
+move across many different carriers. The conversation layer should remain the
+same whether a message travels through a self-hosted relay, copy/paste, an
+image, SMS/MMS, Matrix, a social chat, radio, or even a manually exchanged
+paper message.
 
-Architecture and roadmap: [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md)
+SafeChat uses the pinned upstream Signal implementation for its cryptographic
+sessions. It does not ship a new cryptographic protocol.
+
+> **Early development:** SafeChat is experimental and not ready for
+> high-risk or production communications. The transport model, storage formats,
+> user interface, and threat model are still evolving, and the project has not
+> had a comprehensive independent security audit.
+
+## Project vision
+
+Most secure messengers assume that a suitable online messaging channel is
+available. SafeChat explores the opposite assumption: the available channel may
+be unreliable, monitored, censored, rate-limited, offline, or only willing to
+carry ordinary-looking content.
+
+The intended architecture is:
+
+```text
+verified encrypted conversation
+              ↓
+       carrier-neutral envelope
+              ↓
+ relay · Matrix · SMS/MMS · image · social · radio · paper
+```
+
+Encryption protects message contents. A steganographic carrier may reduce the
+obviousness of encrypted traffic, but it does not hide accounts, timing,
+audience, traffic patterns, or the existence of a suspicious media exchange.
+Every carrier will have different reliability, privacy, size, and legal or
+platform-policy limitations.
+
+## Current status
+
+Implemented and exercised locally:
+
+- Signal-based pairwise sessions with explicit fingerprint verification.
+- Encrypted local identity databases, profiles, and conversation history.
+- A self-hosted HTTP/HTTPS relay with enrollment approval and queued delivery.
+- Copy/paste ciphertext transport.
+- Persistent message IDs, delivery acknowledgements, cursor recovery, and
+  duplicate suppression.
+- Docker-based two-client relay testing.
+
+Planned or exploratory:
+
+- Image and other media steganographic carriers.
+- Matrix, SMS/MMS, radio, paper/QR, and social-platform adapters.
+- More robust chunking, error correction, delay tolerance, and carrier
+  capability negotiation.
+- Friendlier desktop/mobile interfaces and broader independent review.
+
+The relay is only the first network transport, not the definition of the
+project. See [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) for the broader
+roadmap.
 
 Signal dependency policy: [docs/SIGNAL_INTEGRATION.md](docs/SIGNAL_INTEGRATION.md)
 
