@@ -219,6 +219,15 @@ The relay image is published as
 The workflow runs only for `v*` tags and rejects tags that do not point to a
 commit reachable from `main`.
 
+GitHub Actions workflows are checked with Zizmor. Run the same audit locally
+with the official container:
+
+```sh
+docker run --rm -v "$PWD:/repo:ro" -w /repo \
+  ghcr.io/zizmorcore/zizmor:latest \
+  --collect=workflows --no-online-audits .
+```
+
 ## Repository layout
 
 - `codebase/core/` — Signal protocol, domain types, transport/history ports, and encrypted storage
