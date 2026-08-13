@@ -5,7 +5,7 @@ edition = "2024"
 default-run = "safechat"
 
 [workspace]
-members = ["application", "core", "relay", "transports", "relay-protocol"]
+members = ["application", "core", "relay", "transports", "relay-protocol", "slint-ui"]
 resolver = "2"
 
 [dependencies]

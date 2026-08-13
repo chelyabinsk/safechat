@@ -1,0 +1,24 @@
+app-id: io.safechat.SafeChat
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: safechat-slint-ui
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=x11
+  - --device=dri
+
+modules:
+  - name: safechat
+    buildsystem: simple
+    build-options:
+      network: true
+    build-commands:
+      - cargo build --release --locked --manifest-path codebase/Cargo.toml -p safechat-slint-ui
+      - install -Dm755 codebase/target/release/safechat-slint-ui /app/bin/safechat-slint-ui
+      - install -Dm644 packaging/flatpak/io.safechat.SafeChat.desktop /app/share/applications/io.safechat.SafeChat.desktop
+    sources:
+      - type: dir
+        path: ../..

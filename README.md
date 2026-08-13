@@ -63,6 +63,12 @@ roadmap.
 
 Signal dependency policy: [docs/SIGNAL_INTEGRATION.md](docs/SIGNAL_INTEGRATION.md)
 
+Client component and cross-platform UI requirements:
+[docs/CLIENT_ARCHITECTURE_REQUIREMENTS.md](docs/CLIENT_ARCHITECTURE_REQUIREMENTS.md)
+
+Linux packaging and Flatpak instructions:
+[docs/LINUX_PACKAGING.md](docs/LINUX_PACKAGING.md)
+
 ## Run the current implementation
 
 Build the development image and run the official Signal session smoke test:
@@ -284,9 +290,9 @@ Carrier writing and transport integrations are developed as separate adapters.
 
 ## Release binaries
 
-Push a version tag from a commit on `main` to build Linux and Windows
-release archives, publish the relay image to GHCR, and attach the binaries to
-a GitHub release:
+Push a version tag from a commit on `main` to build Linux and Windows release
+archives, build a Flatpak bundle, publish the relay image to GHCR, and attach
+the release artifacts to a GitHub release:
 
 ```sh
 git tag v0.2.5

@@ -1,0 +1,168 @@
+import { Button, ComboBox, GroupBox, HorizontalBox, LineEdit, VerticalBox } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "SafeChat";
+    preferred-width: 980px;
+    preferred-height: 680px;
+
+    in-out property <string> status-text: "Ready";
+    in-out property <string> selected-transport: "Copy/paste";
+    in-out property <bool> profile-ready: false;
+    in-out property <string> fingerprint: "";
+    in-out property <string> public-bundle: "";
+    in-out property <bool> new-chat-open: false;
+    in-out property <bool> profile-info-open: false;
+    callback choose-transport(string);
+    callback send-message(string);
+    callback initialize-profile(string, string, string);
+    callback new-chat();
+    callback copy-bundle();
+    callback copy-fingerprint();
+
+    Rectangle {
+        background: #f7f8fa;
+
+        VerticalBox {
+            spacing: 0px;
+
+            Rectangle {
+                height: 64px;
+                background: #075e54;
+                HorizontalBox {
+                    padding-left: 22px;
+                    padding-right: 22px;
+                    Text { text: "SafeChat"; color: white; font-size: 24px; }
+                    Text { text: root.profile-ready ? "  Private conversations" : ""; color: #d7f5ef; horizontal-stretch: 1; }
+                    Button { text: "My profile"; enabled: root.profile-ready; clicked => { root.profile-info-open = true; } }
+                    Text { text: root.profile-ready ? "● Ready" : ""; color: #d7f5ef; }
+                }
+            }
+
+            HorizontalBox {
+                spacing: 0px;
+
+                Rectangle {
+                    width: 300px;
+                    background: white;
+                    VerticalBox {
+                        padding: 18px;
+                        spacing: 14px;
+                        Text { text: "Chats"; font-size: 22px; color: #1f2933; }
+                        LineEdit { placeholder-text: "Search conversations"; }
+                        Button {
+                            text: "＋  New conversation";
+                            clicked => { root.new-chat(); }
+                        }
+                        Text { text: "No conversations yet"; color: #667781; horizontal-alignment: center; vertical-stretch: 1; }
+                    }
+                }
+
+                Rectangle {
+                    background: #efeae2;
+                    horizontal-stretch: 1;
+                    VerticalBox {
+                        padding: 24px;
+                        spacing: 12px;
+                        if root.new-chat-open: GroupBox {
+                            title: "New conversation";
+                            width: 520px;
+                            VerticalBox {
+                                padding: 18px;
+                                spacing: 12px;
+                                Text { text: "Exchange public bundles through a trusted channel, then verify the fingerprint."; color: #667781; wrap: word-wrap; }
+                                LineEdit { placeholder-text: "Contact public bundle"; }
+                                LineEdit { placeholder-text: "Verified contact fingerprint"; }
+                                Button { text: "Verify and add contact"; clicked => { root.status-text = "Contact verification is ready for the application service."; } }
+                            }
+                        }
+                        if !root.new-chat-open: Text {
+                            text: "Select a conversation";
+                            font-size: 24px;
+                            color: #41525d;
+                            horizontal-alignment: center;
+                            vertical-stretch: 1;
+                        }
+                        Text { text: root.status-text; color: #667781; horizontal-alignment: center; }
+                        HorizontalBox {
+                            spacing: 8px;
+                            LineEdit {
+                                placeholder-text: "Type a message";
+                                horizontal-stretch: 1;
+                                enabled: root.profile-ready;
+                                edited => { root.send-message(self.text); }
+                            }
+                            Button { text: "Send"; enabled: root.profile-ready; clicked => { root.send-message(""); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !root.profile-ready: Rectangle {
+            background: #00000099;
+            width: parent.width;
+            height: parent.height;
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 540px;
+                height: 560px;
+                background: white;
+                border-radius: 12px;
+                VerticalBox {
+                    padding: 30px;
+                    spacing: 14px;
+                    Text { text: "Welcome to SafeChat"; font-size: 28px; color: #075e54; }
+                    Text { text: "Create your encrypted profile to start chatting. Your password stays on this device."; color: #667781; wrap: word-wrap; }
+                    display_name := LineEdit { placeholder-text: "Your name"; text: "default"; }
+                    password := LineEdit { placeholder-text: "Password"; input-type: InputType.password; }
+                    password_confirm := LineEdit { placeholder-text: "Confirm password"; input-type: InputType.password; }
+                    Button {
+                        text: "Create profile";
+                        clicked => { root.initialize-profile(display_name.text, password.text, password_confirm.text); }
+                    }
+                    if root.fingerprint == "": Text { text: root.status-text; color: #667781; wrap: word-wrap; }
+                    if root.fingerprint != "": TouchArea {
+                        width: 480px;
+                        height: 56px;
+                        clicked => { root.copy-fingerprint(); }
+                        Text { text: "Fingerprint: " + root.fingerprint; color: #667781; wrap: char-wrap; width: 480px; horizontal-alignment: center; }
+                    }
+                    Button { text: "Copy public bundle"; clicked => { root.copy-bundle(); } }
+                }
+            }
+        }
+
+        if root.profile-info-open: Rectangle {
+            background: #00000099;
+            width: parent.width;
+            height: parent.height;
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 480px;
+                height: 300px;
+                background: white;
+                border-radius: 12px;
+                VerticalBox {
+                    padding: 28px;
+                    spacing: 14px;
+                    Text { text: "My profile"; font-size: 26px; color: #075e54; }
+                    Text { text: "Your fingerprint"; color: #667781; }
+                    TouchArea {
+                        width: 424px;
+                        height: 64px;
+                        clicked => { root.copy-fingerprint(); }
+                        Text { text: root.fingerprint; font-size: 20px; color: #1f2933; wrap: char-wrap; width: 424px; horizontal-alignment: center; }
+                    }
+                    Text { text: "Share the public bundle only through a trusted channel."; color: #667781; wrap: word-wrap; }
+                    HorizontalBox {
+                        spacing: 8px;
+                        Button { text: "Copy public bundle"; clicked => { root.copy-bundle(); } }
+                        Button { text: "Close"; clicked => { root.profile-info-open = false; } }
+                    }
+                }
+            }
+        }
+    }
+}

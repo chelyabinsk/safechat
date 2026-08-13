@@ -43,7 +43,8 @@ All media adapters should encode the same binary envelope. The carrier should no
 
 The envelope should contain:
 
-- magic bytes
+- compact version and frame-type fields; textual magic prefixes are avoided in
+  current carrier output
 - protocol version
 - message ID
 - payload type

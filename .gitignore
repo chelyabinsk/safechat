@@ -29,6 +29,9 @@ relay-tls/
 relay-data-local/
 relay-tls-local/
 
+# Locally built Flatpak bundles.
+packaging/flatpak/dist/
+
 # Editor and OS files.
 .DS_Store
 .vscode/
