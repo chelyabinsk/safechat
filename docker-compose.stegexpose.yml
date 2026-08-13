@@ -1,0 +1,8 @@
+services:
+  stegexpose:
+    build:
+      context: .
+      dockerfile: Dockerfile.stegexpose
+    image: safechat-stegexpose:latest
+    volumes:
+      - ./codebase/steg-benchmark:/bench:ro

@@ -244,6 +244,30 @@ For text-only transports, the UI displays unlabelled URL-safe Base64
 ciphertext; the selected paste context determines how it is decoded. This does
 not replace encryption or authentication.
 
+## StegExpose benchmark
+
+The current PNG carrier is intentionally an evaluation-only sequential RGB LSB
+adapter. StegExpose can benchmark its detectability in a disposable Docker
+container:
+
+```bash
+mkdir -p codebase/steg-benchmark/clean codebase/steg-benchmark/encoded
+cp codebase/carrier.png codebase/steg-benchmark/clean/carrier.png
+head -c 4096 /dev/urandom > codebase/steg-benchmark/payload.bin
+docker compose run --rm rust-dev cargo run --locked -- embed \
+  carrier.png steg-benchmark/payload.bin \
+  steg-benchmark/encoded/carrier.png
+docker compose -f docker-compose.stegexpose.yml build
+docker compose -f docker-compose.stegexpose.yml run --rm stegexpose \
+  /bench/clean default 0.2 /dev/stdout
+docker compose -f docker-compose.stegexpose.yml run --rm stegexpose \
+  /bench/encoded default 0.2 /dev/stdout
+```
+
+StegExpose is an external LSB detector; a result below its threshold is not a
+proof of undetectability. The benchmark image is kept separate from production
+images and generated samples are ignored by Git.
+
 ## Other current commands
 
 The CLI also exposes protocol validation and detector commands:

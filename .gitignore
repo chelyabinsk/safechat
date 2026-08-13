@@ -22,6 +22,7 @@ codebase/bob.txt
 
 # Local two-user demo state and plaintext/ciphertext samples.
 demo/
+codebase/steg-benchmark/
 
 # Native TLS material for the local relay deployment.
 relay-tls/

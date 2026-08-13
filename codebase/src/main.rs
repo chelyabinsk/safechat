@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
 use dialoguer::Password;
-use png::{ColorType, Decoder, Transformations};
+use png::{ColorType, Decoder, Encoder, Transformations};
 use std::{fs, path::PathBuf};
 
 mod carrier;
@@ -59,6 +59,12 @@ enum Command {
     },
     /// Report PNG dimensions and the evaluation adapter capacity.
     Inspect { input: PathBuf },
+    /// Embed opaque bytes into a PNG using the current evaluation carrier.
+    Embed {
+        carrier: PathBuf,
+        payload: PathBuf,
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -159,6 +165,11 @@ fn main() -> Result<()> {
             window_bits,
         } => benchmark(&clean_dir, &encoded_dir, window_bits),
         Command::Inspect { input } => inspect(&input),
+        Command::Embed {
+            carrier,
+            payload,
+            output,
+        } => embed(&carrier, &payload, &output),
     }
 }
 
@@ -351,9 +362,24 @@ fn inspect(input: &PathBuf) -> Result<()> {
         "evaluation LSB capacity: {} bytes",
         PngCarrier.capacity_bytes(&image)
     );
-    println!(
-        "note: encrypted protocol messages use the Signal adapter; carrier writing is not enabled yet"
-    );
+    println!("carrier adapter: sequential RGB LSB (benchmark only)");
+    Ok(())
+}
+
+fn embed(carrier: &PathBuf, payload: &PathBuf, output: &PathBuf) -> Result<()> {
+    let mut image = read_png(carrier)?;
+    let bytes =
+        fs::read(payload).with_context(|| format!("reading payload {}", payload.display()))?;
+    PngCarrier.embed(&mut image, &bytes)?;
+    let file =
+        fs::File::create(output).with_context(|| format!("creating PNG {}", output.display()))?;
+    let mut encoder = Encoder::new(file, image.width, image.height);
+    encoder.set_color(ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().context("writing PNG header")?;
+    writer
+        .write_image_data(&image.pixels)
+        .context("writing PNG pixels")?;
     Ok(())
 }
 
