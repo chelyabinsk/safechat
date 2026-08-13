@@ -224,7 +224,7 @@ In Alice, run:
 /cipher
 ```
 
-The history should show `safechat-text-v1:` ciphertext rather than plaintext.
+The history should show URL-safe Base64 ciphertext rather than plaintext.
 Run `/clean` to return to readable history.
 
 ## 9. Check persisted state

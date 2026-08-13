@@ -6,6 +6,7 @@
 //! policies.
 
 use anyhow::{Context, Result, bail};
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use rusqlite::{Connection, OptionalExtension, params};
 use signal_protocol::{
     CiphertextMessage, CiphertextMessageType, DeviceId, GenericSignedPreKey, IdentityKey,
@@ -26,12 +27,16 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-const ENVELOPE_MAGIC: &[u8] = b"safechat-signal-envelope-v1\0";
-const ENVELOPE_HEADER_LEN: usize = ENVELOPE_MAGIC.len() + 1 + 4;
+const FORMAT_VERSION: u8 = 1;
+const FRAME_RECOVERY: u8 = 1;
+const FRAME_BUNDLE: u8 = 2;
+const FRAME_ENVELOPE: u8 = 3;
+const FRAME_MESSAGE: u8 = 4;
+const FRAME_MESSAGE_COMPRESSED: u8 = 5;
+const ENVELOPE_HEADER_LEN: usize = 1 + 1 + 1 + 4;
 const MAX_CIPHERTEXT_LEN: usize = 16 * 1024 * 1024;
-const BUNDLE_MAGIC: &[u8] = b"safechat-signal-bundle-v1\0";
-const RECOVERY_MAGIC: &[u8] = b"safechat-signal-recovery-v1\0";
-const MESSAGE_MAGIC: &[u8] = b"safechat-message-v1\0";
+const MIN_COMPRESSIBLE_MESSAGE_LEN: usize = 256;
+const MAX_MESSAGE_LEN: usize = 8 * 1024 * 1024;
 const MAX_BUNDLE_FIELD_LEN: usize = 16 * 1024;
 const PREKEY_LOW_WATERMARK: usize = 8;
 const PREKEY_TARGET: usize = 32;
@@ -78,7 +83,7 @@ pub struct IdentityRecoveryRecord {
 impl IdentityRecoveryRecord {
     fn payload(&self) -> Result<Vec<u8>> {
         let bundle = self.new_bundle.encode()?;
-        let mut payload = RECOVERY_MAGIC.to_vec();
+        let mut payload = vec![FORMAT_VERSION, FRAME_RECOVERY];
         put_bytes(&mut payload, &self.old_identity.serialize())?;
         put_bytes(&mut payload, &bundle)?;
         payload.extend(self.effective_at.to_be_bytes());
@@ -94,7 +99,7 @@ impl IdentityRecoveryRecord {
 
     pub fn decode(input: &[u8]) -> Result<Self> {
         let mut reader = BundleReader { input, offset: 0 };
-        reader.expect(RECOVERY_MAGIC)?;
+        reader.expect_frame(FRAME_RECOVERY)?;
         let old_identity = IdentityKey::decode(&reader.bytes()?)?;
         let new_bundle = SignalPreKeyBundle::decode(&reader.bytes()?)?;
         let effective_at = reader.u64()?;
@@ -181,23 +186,93 @@ impl SafeChatMessage {
     }
 
     fn encode(&self) -> Result<Vec<u8>> {
+        if self.plaintext.len() > MAX_MESSAGE_LEN {
+            bail!("message exceeds SafeChat limit");
+        }
         let length = u32::try_from(self.plaintext.len()).context("message length overflow")?;
-        let mut output = MESSAGE_MAGIC.to_vec();
+
+        let mut compressed = ZlibEncoder::new(Vec::new(), Compression::default());
+        std::io::Write::write_all(&mut compressed, &self.plaintext)?;
+        let compressed = compressed.finish()?;
+        if self.plaintext.len() >= MIN_COMPRESSIBLE_MESSAGE_LEN
+            && compressed.len() < self.plaintext.len()
+        {
+            let stored_length =
+                u32::try_from(compressed.len()).context("compressed message length overflow")?;
+            let mut output = Vec::with_capacity(1 + 1 + 16 + 4 + 4 + compressed.len());
+            output.push(FORMAT_VERSION);
+            output.push(FRAME_MESSAGE_COMPRESSED);
+            output.extend(self.id.bytes());
+            output.extend(length.to_be_bytes());
+            output.extend(stored_length.to_be_bytes());
+            output.extend(compressed);
+            return Ok(output);
+        }
+
+        let mut output = Vec::with_capacity(1 + 1 + 16 + 4 + 4 + self.plaintext.len());
+        output.push(FORMAT_VERSION);
+        output.push(FRAME_MESSAGE);
         output.extend(self.id.bytes());
+        output.extend(length.to_be_bytes());
         output.extend(length.to_be_bytes());
         output.extend(&self.plaintext);
         Ok(output)
     }
 
     fn decode(input: &[u8]) -> Result<Self> {
-        let mut reader = BundleReader { input, offset: 0 };
-        reader.expect(MESSAGE_MAGIC)?;
-        let id = MessageId::from_bytes(&reader.take(16)?)?;
-        let length = reader.u32()? as usize;
-        let plaintext = reader.take(length)?;
-        if reader.offset != input.len() {
-            bail!("trailing bytes in SafeChat message");
+        if input.len() < 2 {
+            bail!("truncated SafeChat message");
         }
+        if input[0] != FORMAT_VERSION {
+            bail!("unsupported SafeChat message version");
+        }
+        if input[1] == FRAME_MESSAGE_COMPRESSED {
+            let header_len = 1 + 1 + 16 + 4 + 4;
+            if input.len() < header_len {
+                bail!("truncated compressed SafeChat message");
+            }
+            let id_start = 2;
+            let id = MessageId::from_bytes(&input[id_start..id_start + 16])?;
+            let original_start = id_start + 16;
+            let original_length =
+                u32::from_be_bytes(input[original_start..original_start + 4].try_into()?) as usize;
+            let stored_start = original_start + 4;
+            let stored_length =
+                u32::from_be_bytes(input[stored_start..stored_start + 4].try_into()?) as usize;
+            if original_length > MAX_MESSAGE_LEN
+                || stored_length > MAX_MESSAGE_LEN
+                || input.len() != header_len + stored_length
+            {
+                bail!("invalid compressed SafeChat message length");
+            }
+            let decoder = ZlibDecoder::new(&input[header_len..]);
+            let mut plaintext = Vec::with_capacity(original_length);
+            decoder
+                .take((original_length + 1) as u64)
+                .read_to_end(&mut plaintext)?;
+            if plaintext.len() != original_length {
+                bail!("decompressed SafeChat message length mismatch");
+            }
+            return Ok(Self { id, plaintext });
+        }
+
+        if input[1] != FRAME_MESSAGE {
+            bail!("unsupported SafeChat message frame");
+        }
+        if input.len() < 26 {
+            bail!("truncated SafeChat message");
+        }
+        let id = MessageId::from_bytes(&input[2..18])?;
+        let original_length = u32::from_be_bytes(input[18..22].try_into()?) as usize;
+        let stored_length = u32::from_be_bytes(input[22..26].try_into()?) as usize;
+        if original_length > MAX_MESSAGE_LEN
+            || stored_length > MAX_MESSAGE_LEN
+            || stored_length != original_length
+            || input.len() != 26 + stored_length
+        {
+            bail!("message exceeds SafeChat limit");
+        }
+        let plaintext = input[26..].to_vec();
         Ok(Self { id, plaintext })
     }
 }
@@ -234,7 +309,8 @@ impl SignalEnvelope {
         }
         let length = u32::try_from(self.ciphertext.len()).context("ciphertext length overflow")?;
         let mut output = Vec::with_capacity(ENVELOPE_HEADER_LEN + self.ciphertext.len());
-        output.extend(ENVELOPE_MAGIC);
+        output.push(FORMAT_VERSION);
+        output.push(FRAME_ENVELOPE);
         output.push(self.message_type);
         output.extend(length.to_be_bytes());
         output.extend(&self.ciphertext);
@@ -243,16 +319,19 @@ impl SignalEnvelope {
 
     /// Parse and validate a carrier-independent frame.
     pub fn decode(input: &[u8]) -> Result<Self> {
-        if input.len() < ENVELOPE_HEADER_LEN || !input.starts_with(ENVELOPE_MAGIC) {
+        if input.len() < ENVELOPE_HEADER_LEN
+            || input[0] != FORMAT_VERSION
+            || input[1] != FRAME_ENVELOPE
+        {
             bail!("invalid Signal envelope");
         }
-        let message_type = input[ENVELOPE_MAGIC.len()];
+        let message_type = input[2];
         if message_type != CiphertextMessageType::Whisper as u8
             && message_type != CiphertextMessageType::PreKey as u8
         {
             bail!("unsupported Signal ciphertext type");
         }
-        let length_start = ENVELOPE_MAGIC.len() + 1;
+        let length_start = 3;
         let length = u32::from_be_bytes(input[length_start..length_start + 4].try_into()?) as usize;
         if length > MAX_CIPHERTEXT_LEN || input.len() != ENVELOPE_HEADER_LEN + length {
             bail!("invalid Signal envelope length");
@@ -291,7 +370,7 @@ pub struct SignalPreKeyBundle {
 impl SignalPreKeyBundle {
     pub fn encode(&self) -> Result<Vec<u8>> {
         let content: PreKeyBundleContent = self.bundle.clone().into();
-        let mut out = BUNDLE_MAGIC.to_vec();
+        let mut out = vec![FORMAT_VERSION, FRAME_BUNDLE];
         put_bytes(&mut out, self.name.as_bytes())?;
         out.extend(u32::from(self.device_id).to_be_bytes());
         out.extend(content.registration_id.unwrap().to_be_bytes());
@@ -318,7 +397,7 @@ impl SignalPreKeyBundle {
 
     pub fn decode(input: &[u8]) -> Result<Self> {
         let mut reader = BundleReader { input, offset: 0 };
-        reader.expect(BUNDLE_MAGIC)?;
+        reader.expect_frame(FRAME_BUNDLE)?;
         let name = String::from_utf8(reader.bytes()?).context("bundle name is not UTF-8")?;
         let device_id = DeviceId::try_from(reader.u32()?)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -389,11 +468,10 @@ struct BundleReader<'a> {
 }
 
 impl<'a> BundleReader<'a> {
-    fn expect(&mut self, prefix: &[u8]) -> Result<()> {
-        if self.input.get(self.offset..self.offset + prefix.len()) != Some(prefix) {
-            bail!("invalid Signal prekey bundle");
+    fn expect_frame(&mut self, frame: u8) -> Result<()> {
+        if self.byte()? != FORMAT_VERSION || self.byte()? != frame {
+            bail!("invalid SafeChat frame");
         }
-        self.offset += prefix.len();
         Ok(())
     }
     fn byte(&mut self) -> Result<u8> {
@@ -441,19 +519,6 @@ impl<'a> BundleReader<'a> {
             .input
             .get(self.offset..end)
             .context("truncated Signal bundle")?
-            .to_vec();
-        self.offset = end;
-        Ok(bytes)
-    }
-    fn take(&mut self, length: usize) -> Result<Vec<u8>> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .context("bundle offset overflow")?;
-        let bytes = self
-            .input
-            .get(self.offset..end)
-            .context("truncated SafeChat message")?
             .to_vec();
         self.offset = end;
         Ok(bytes)
@@ -1620,7 +1685,37 @@ mod tests {
         assert_eq!(decoded, message);
         assert_eq!(decoded.plaintext, b"hello");
         assert_eq!(decoded.id.encode().len(), 32);
-        assert!(SafeChatMessage::decode(b"safechat-message-v1\0garbage").is_err());
+        assert!(SafeChatMessage::decode(&[FORMAT_VERSION, FRAME_MESSAGE]).is_err());
+    }
+
+    #[test]
+    fn repetitive_messages_are_compressed_and_round_trip() {
+        let message = SafeChatMessage::new(&vec![b'a'; 100_000]);
+        let encoded = message.encode().unwrap();
+        assert_eq!(encoded[0..2], [FORMAT_VERSION, FRAME_MESSAGE_COMPRESSED]);
+        assert_eq!(SafeChatMessage::decode(&encoded).unwrap(), message);
+    }
+
+    #[test]
+    fn small_repetitive_messages_are_not_compressed() {
+        let message = SafeChatMessage::new(&vec![b'a'; MIN_COMPRESSIBLE_MESSAGE_LEN - 1]);
+        let encoded = message.encode().unwrap();
+        assert_eq!(encoded[0..2], [FORMAT_VERSION, FRAME_MESSAGE]);
+        assert_eq!(SafeChatMessage::decode(&encoded).unwrap(), message);
+    }
+
+    #[test]
+    fn incompressible_messages_keep_v1_compatibility() {
+        let mut bytes = vec![0u8; 1024];
+        let mut state = 0x9e3779b9u32;
+        for byte in &mut bytes {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (state >> 24) as u8;
+        }
+        let message = SafeChatMessage::new(&bytes);
+        let encoded = message.encode().unwrap();
+        assert_eq!(encoded[0..2], [FORMAT_VERSION, FRAME_MESSAGE]);
+        assert_eq!(SafeChatMessage::decode(&encoded).unwrap(), message);
     }
 
     #[test]

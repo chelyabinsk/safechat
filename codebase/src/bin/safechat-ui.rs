@@ -632,7 +632,9 @@ fn load_bundle(path: &Path) -> Result<SignalPreKeyBundle> {
 
 fn read_bundle_prompt(prompt: &str) -> Result<SignalPreKeyBundle> {
     let mut text = Input::<String>::new().with_prompt(prompt).interact_text()?;
-    if !text.trim().starts_with("safechat-bundle-v1:") {
+    let bytes = if let Ok(bytes) = BundleTransport.decode(&text) {
+        bytes
+    } else {
         println!("Paste the remaining bundle text, then enter END on its own line.");
         loop {
             let mut line = String::new();
@@ -642,8 +644,8 @@ fn read_bundle_prompt(prompt: &str) -> Result<SignalPreKeyBundle> {
             }
             text.push_str(&line);
         }
-    }
-    let bytes = BundleTransport.decode(&text)?;
+        BundleTransport.decode(&text)?
+    };
     SignalPreKeyBundle::decode(&bytes)
 }
 
@@ -1706,7 +1708,7 @@ mod tests {
                 text: "private message".to_owned(),
                 message_id: "".to_owned(),
                 peer: "alice".to_owned(),
-                ciphertext: "safechat-text-v1:test".to_owned(),
+                ciphertext: "test".to_owned(),
                 delivery_status: String::new(),
                 transport_recipient: String::new(),
             }],

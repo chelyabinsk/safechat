@@ -336,11 +336,9 @@ fn read_bundle_bytes(path: &PathBuf) -> Result<Vec<u8>> {
     let bytes =
         fs::read(path).with_context(|| format!("reading Signal bundle {}", path.display()))?;
     if let Ok(text) = std::str::from_utf8(&bytes)
-        && text
-            .trim_start()
-            .starts_with(safechat::transport::BUNDLE_HEADER)
+        && let Ok(bundle) = BundleTransport.decode(text)
     {
-        return BundleTransport.decode(text);
+        return Ok(bundle);
     }
     Ok(bytes)
 }

@@ -1,0 +1,8 @@
+[package]
+name = "safechat-relay-protocol"
+version = "0.2.5"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+

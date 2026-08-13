@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
 use reqwest::blocking::Client;
+use safechat_relay_protocol as relay_binary;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -52,10 +53,9 @@ struct Registration {
     access_token: String,
 }
 #[derive(Deserialize)]
-struct Message {
+struct BinaryMessageMetadata {
     server_id: i64,
     message_id: String,
-    ciphertext: String,
 }
 
 fn main() -> Result<()> {
@@ -132,10 +132,12 @@ fn run(
     println!("{}: registered", client_id);
     if send {
         let message_id = format!("smoke-{}-{}", client_id, now());
-        let ciphertext = enc(b"encrypted-smoke-payload");
-        let body = serde_json::to_vec(
-            &json!({"recipient": recipient, "message_id": message_id, "ciphertext": ciphertext}),
-        )?;
+        let body = relay_binary::encode_submit(&relay_binary::Submit {
+            recipient: recipient.to_owned(),
+            message_id: message_id.clone(),
+            expires_at: None,
+            ciphertext: b"encrypted-smoke-payload".to_vec(),
+        })?;
         let h = headers(
             &pair,
             &registration.access_token,
@@ -143,6 +145,9 @@ fn run(
             "/v1/messages",
             &body,
         );
+        let mut h = h;
+        h.insert("content-type", "application/octet-stream".parse().unwrap());
+        h.insert("accept", "application/octet-stream".parse().unwrap());
         http.post(format!("{}/v1/messages", base))
             .headers(h)
             .body(body)
@@ -151,24 +156,28 @@ fn run(
         println!("{}: sent {}", client_id, message_id);
     } else {
         let path = "/v1/messages?cursor=0";
-        let message = (0..20)
+        let message = (0..120)
             .find_map(|_| {
-                let response: Result<Vec<Message>, _> = http
+                let response: Result<Vec<u8>, _> = http
                     .get(format!("{}{}", base, path))
-                    .headers(headers(
-                        &pair,
-                        &registration.access_token,
-                        "GET",
-                        "/v1/messages",
-                        &[],
-                    ))
+                    .headers({
+                        let mut h = headers(
+                            &pair,
+                            &registration.access_token,
+                            "GET",
+                            "/v1/messages",
+                            &[],
+                        );
+                        h.insert("accept", "application/octet-stream".parse().unwrap());
+                        h
+                    })
                     .send()
                     .and_then(|r| r.error_for_status())
-                    .and_then(|r| r.json());
-                let found = response
-                    .ok()?
-                    .into_iter()
-                    .find(|m| m.ciphertext == enc(b"encrypted-smoke-payload"));
+                    .and_then(|r| r.bytes().map(|bytes| bytes.to_vec()));
+                let response = response.ok()?;
+                let found = parse_binary_message(&response)
+                    .filter(|(_, ciphertext)| ciphertext == b"encrypted-smoke-payload")
+                    .map(|(message, _)| message);
                 if found.is_none() {
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
@@ -178,13 +187,11 @@ fn run(
         let ack_path = format!("/v1/messages/{}/ack", message.server_id);
         let body = br#"{"acknowledged":true}"#;
         http.post(format!("{}{}", base, ack_path))
-            .headers(headers(
-                &pair,
-                &registration.access_token,
-                "POST",
-                &ack_path,
-                body,
-            ))
+            .headers({
+                let mut h = headers(&pair, &registration.access_token, "POST", &ack_path, body);
+                h.insert("content-type", "application/json".parse().unwrap());
+                h
+            })
             .body(body.to_vec())
             .send()?
             .error_for_status()?;
@@ -231,6 +238,21 @@ fn headers(
     );
     h.insert("x-safechat-signature", enc(&signature).parse().unwrap());
     h
+}
+
+fn parse_binary_message(input: &[u8]) -> Option<(BinaryMessageMetadata, Vec<u8>)> {
+    relay_binary::decode_messages(input)
+        .ok()?
+        .into_iter()
+        .find_map(|message| {
+            (message.ciphertext == b"encrypted-smoke-payload").then_some((
+                BinaryMessageMetadata {
+                    server_id: message.server_id,
+                    message_id: message.message_id,
+                },
+                message.ciphertext,
+            ))
+        })
 }
 
 fn rand_bytes() -> [u8; 16] {

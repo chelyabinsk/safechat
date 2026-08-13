@@ -123,9 +123,12 @@ or reliable.
 
 ## 4. HTTPS API
 
-Use versioned HTTPS endpoints with ordinary JSON request/response bodies. Binary
-payloads should be URL-safe Base64 strings. The server should expose no custom
-cryptographic protocol over the wire beyond signed SafeChat control records.
+Use versioned HTTPS endpoints. Enrollment, bundle, contact, status,
+acknowledgement, administrative, and WebSocket APIs remain ordinary JSON
+request/response or frame bodies. Only message submission and HTTP retrieval
+use the required binary representation; JSON message bodies are not accepted.
+The server should expose no custom cryptographic protocol
+over the wire beyond signed SafeChat control records.
 
 ### Health and capabilities
 
@@ -184,6 +187,25 @@ A submitted message contains:
 The server adds its own queue identifier and acceptance timestamp. The server
 may acknowledge queue acceptance and retrieval, but cannot determine whether a
 recipient successfully decrypted or displayed a message.
+
+Only message submission and HTTP retrieval use binary. For POST
+/v1/messages, Content-Type and Accept must both be
+application/octet-stream. For GET /v1/messages, Accept must be
+application/octet-stream. Unsupported media types are rejected and legacy JSON
+message representations are not accepted. Enrollment,
+bundles, contacts, status, acknowledgements, administration, and WebSocket
+frames remain JSON.
+
+The binary frame begins with big-endian u16 protocol version 1, u16 schema
+version 1, and a one-byte frame kind (submit=1, messages=2); it has no textual
+magic prefix. Lengths are big-endian u32 byte lengths; strings are UTF-8;
+optional values use only flags 0 or 1. The shared
+safechat-relay-protocol crate enforces the 16 MiB body limit and explicit
+limits of 256 bytes each for recipients, message IDs, and addresses, plus
+16 MiB for ciphertext and 100 returned messages. A version or schema change
+is incompatible and requires a new negotiated contract. Binary ciphertext is
+raw bytes. The JSON
+control-plane representation is unrelated to message submission/retrieval.
 
 Message delivery uses a hybrid HTTP model. Clients maintain an authenticated
 WebSocket while the UI is active and receive new queue items over that

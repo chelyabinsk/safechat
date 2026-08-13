@@ -2,17 +2,18 @@ use axum::{
     Router,
     body::Bytes,
     extract::{
-        Path, Query, State, WebSocketUpgrade,
+        DefaultBodyLimit, Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use axum_server::tls_rustls::RustlsConfig;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use safechat_relay_protocol as relay_binary;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -23,13 +24,23 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 
 const API_VERSION: &str = "safechat-relay-v1";
 const REGISTER_DOMAIN: &[u8] = b"safechat-relay-register-v1\0";
 const REQUEST_DOMAIN: &[u8] = b"safechat-relay-request-v1\0";
 const ENROLLMENT_REQUEST_DOMAIN: &[u8] = b"safechat-relay-enrollment-request-v1\0";
-const MAX_BODY: usize = 16 * 1024 * 1024;
+const MAX_BODY: usize = relay_binary::MAX_BODY;
+const JSON_MEDIA_TYPE: &str = "application/json";
+const BINARY_MEDIA_TYPE: &str = "application/octet-stream";
+const MAX_ID_BYTES: usize = 256;
+const MAX_FINGERPRINT_BYTES: usize = 256;
+const MAX_LABEL_BYTES: usize = 256;
+const MAX_SECRET_BYTES: usize = 512;
+const MAX_IDENTITY_B64_BYTES: usize = 256;
+const MAX_SIGNATURE_B64_BYTES: usize = 512;
+const MAX_BUNDLE_BYTES: usize = 1024 * 1024;
 
 #[derive(Parser)]
 #[command(name = "safechat-relay", about = "Standalone SafeChat HTTPS relay")]
@@ -187,14 +198,6 @@ struct BundleResponse {
 }
 
 #[derive(Deserialize)]
-struct MessageRequest {
-    recipient: String,
-    message_id: String,
-    ciphertext: String,
-    expires_at: Option<u64>,
-}
-
-#[derive(Deserialize)]
 struct ContactRequestPayload {
     request_id: String,
     recipient: String,
@@ -229,6 +232,143 @@ struct MessageResponse {
     ciphertext: String,
     accepted_at: u64,
     expires_at: Option<u64>,
+}
+
+fn media_type(headers: &HeaderMap, name: &str) -> anyhow::Result<Option<String>> {
+    let Some(value) = headers.get(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap()
+        .trim()
+        .to_ascii_lowercase();
+    if value == JSON_MEDIA_TYPE || value == BINARY_MEDIA_TYPE {
+        Ok(Some(value))
+    } else {
+        anyhow::bail!("unsupported {name} media type")
+    }
+}
+
+fn require_json_content(headers: &HeaderMap) -> anyhow::Result<()> {
+    if media_type(headers, "content-type")?.as_deref() != Some(JSON_MEDIA_TYPE) {
+        anyhow::bail!("Content-Type must be application/json");
+    }
+    Ok(())
+}
+
+fn validate_optional_json_content(headers: &HeaderMap) -> anyhow::Result<()> {
+    if headers.contains_key("content-type") {
+        require_json_content(headers)?;
+    }
+    Ok(())
+}
+
+fn validate_json_accept(headers: &HeaderMap) -> anyhow::Result<()> {
+    let Some(value) = headers.get("accept") else {
+        return Ok(());
+    };
+    let value = value.to_str()?;
+    let values: Vec<_> = value.split(',').map(str::trim).collect();
+    if values.is_empty()
+        || values
+            .iter()
+            .any(|part| part.is_empty() || (*part != JSON_MEDIA_TYPE && *part != "*/*"))
+    {
+        anyhow::bail!("Accept must be application/json");
+    }
+    Ok(())
+}
+
+fn validate_text(value: &str, limit: usize, field: &str) -> anyhow::Result<()> {
+    if value.len() > limit {
+        anyhow::bail!("{field} exceeds maximum length of {limit} bytes");
+    }
+    Ok(())
+}
+
+fn decode_bounded_base64(
+    value: &str,
+    encoded_limit: usize,
+    decoded_limit: usize,
+    field: &str,
+) -> anyhow::Result<Vec<u8>> {
+    validate_text(value, encoded_limit, field)?;
+    let decoded = b64decode(value)?;
+    if decoded.len() > decoded_limit {
+        anyhow::bail!("{field} exceeds maximum decoded length");
+    }
+    Ok(decoded)
+}
+
+fn wants_binary(headers: &HeaderMap) -> anyhow::Result<bool> {
+    let Some(value) = headers.get("accept") else {
+        return Ok(false);
+    };
+    let values: Vec<_> = value.to_str()?.split(',').map(str::trim).collect();
+    if values.is_empty()
+        || values
+            .iter()
+            .any(|part| part.is_empty() || part.contains(';'))
+    {
+        anyhow::bail!("unsupported Accept media type or parameters");
+    }
+    if values
+        .iter()
+        .any(|part| *part != JSON_MEDIA_TYPE && *part != BINARY_MEDIA_TYPE && *part != "*/*")
+    {
+        anyhow::bail!("unsupported Accept media type");
+    }
+    Ok(values
+        .iter()
+        .any(|part| *part == BINARY_MEDIA_TYPE || *part == "*/*"))
+}
+
+fn require_binary_accept(headers: &HeaderMap) -> anyhow::Result<()> {
+    if !wants_binary(headers)? {
+        anyhow::bail!("message endpoints require Accept: application/octet-stream");
+    }
+    Ok(())
+}
+
+fn decode_message_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> anyhow::Result<(String, String, Option<u64>, Vec<u8>)> {
+    if media_type(headers, "content-type")?.as_deref() != Some(BINARY_MEDIA_TYPE) {
+        anyhow::bail!("message submission requires Content-Type: application/octet-stream");
+    }
+    let request = relay_binary::decode_submit(body)?;
+    Ok((
+        request.recipient,
+        request.message_id,
+        request.expires_at,
+        request.ciphertext,
+    ))
+}
+
+fn binary_message(message: &MessageResponse) -> anyhow::Result<relay_binary::Message> {
+    Ok(relay_binary::Message {
+        server_id: message.server_id,
+        sender: message.sender.clone(),
+        sender_address: message.sender_address.clone(),
+        message_id: message.message_id.clone(),
+        accepted_at: message.accepted_at,
+        expires_at: message.expires_at,
+        ciphertext: URL_SAFE_NO_PAD
+            .decode(&message.ciphertext)
+            .map_err(|error| anyhow::anyhow!("stored ciphertext is invalid: {error}"))?,
+    })
+}
+
+fn encode_binary_messages(messages: &[MessageResponse]) -> anyhow::Result<Vec<u8>> {
+    messages
+        .iter()
+        .map(binary_message)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .and_then(|messages| relay_binary::encode_messages(&messages))
 }
 
 #[derive(Deserialize)]
@@ -473,6 +613,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/messages/status", get(message_status))
         .route("/v1/messages/{server_id}/ack", post(ack_message))
         .route("/v1/events", get(events))
+        .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
 }
 
@@ -481,13 +622,32 @@ async fn admin_allowlist(
     headers: HeaderMap,
     axum::Json(request): axum::Json<AdminAllowlistRequest>,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    require_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(&request.client_id, MAX_ID_BYTES, "client ID").map_err(bad_request)?;
+    validate_text(&request.fingerprint, MAX_FINGERPRINT_BYTES, "fingerprint")
+        .map_err(bad_request)?;
+    validate_text(
+        &request.enrollment_secret,
+        MAX_SECRET_BYTES,
+        "enrollment secret",
+    )
+    .map_err(bad_request)?;
+    validate_text(&request.label, MAX_LABEL_BYTES, "label").map_err(bad_request)?;
+    decode_bounded_base64(
+        &request.identity_key,
+        MAX_IDENTITY_B64_BYTES,
+        128,
+        "identity key",
+    )
+    .map_err(bad_request)?;
     let Some(expected) = state.admin_token.as_deref() else {
         return Err(not_found());
     };
     let Some(provided) = bearer(&headers) else {
         return Err(unauthorized());
     };
-    if provided != expected {
+    if provided.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
         return Err(unauthorized());
     }
     let db = state.db.lock().await;
@@ -512,21 +672,40 @@ async fn health() -> impl IntoResponse {
 
 async fn enrollment_request(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::Json(request): axum::Json<EnrollmentRequest>,
 ) -> Result<axum::Json<EnrollmentResponse>, ApiError> {
-    if request.device_address.len() > 256
-        || request.fingerprint.len() > 256
+    require_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
+    if request.device_address.len() > MAX_ID_BYTES
+        || request.fingerprint.len() > MAX_FINGERPRINT_BYTES
         || request.enrollment_secret_hash.len() != 64
-        || request.bundle.len() > MAX_BODY
+        || !request
+            .enrollment_secret_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || request.bundle.len() > MAX_BUNDLE_BYTES * 2
     {
         return Err(bad_request(anyhow::anyhow!(
             "invalid enrollment request size"
         )));
     }
-    let identity_bytes = b64decode(&request.identity_key).map_err(bad_request)?;
+    let identity_bytes = decode_bounded_base64(
+        &request.identity_key,
+        MAX_IDENTITY_B64_BYTES,
+        128,
+        "identity key",
+    )
+    .map_err(bad_request)?;
     let identity = IdentityKey::decode(&identity_bytes)
         .map_err(|_| bad_request(anyhow::anyhow!("invalid identity key")))?;
-    let bundle = b64decode(&request.bundle).map_err(bad_request)?;
+    let bundle = decode_bounded_base64(
+        &request.bundle,
+        MAX_BUNDLE_BYTES * 2,
+        MAX_BUNDLE_BYTES,
+        "bundle",
+    )
+    .map_err(bad_request)?;
     let mut signed = ENROLLMENT_REQUEST_DOMAIN.to_vec();
     signed.extend(request.device_address.as_bytes());
     signed.push(0);
@@ -535,7 +714,13 @@ async fn enrollment_request(
     signed.extend(request.enrollment_secret_hash.as_bytes());
     signed.push(0);
     signed.extend(Sha256::digest(&bundle));
-    let signature = b64decode(&request.signature).map_err(bad_request)?;
+    let signature = decode_bounded_base64(
+        &request.signature,
+        MAX_SIGNATURE_B64_BYTES,
+        256,
+        "signature",
+    )
+    .map_err(bad_request)?;
     if !identity.public_key().verify_signature(&signed, &signature) {
         return Err(unauthorized());
     }
@@ -574,6 +759,8 @@ async fn create_contact_request(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<axum::Json<ContactRequestResponse>, ApiError> {
+    require_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
     let sender = authenticate_request(
         &state,
         &headers,
@@ -585,7 +772,22 @@ async fn create_contact_request(
     .await?;
     let request: ContactRequestPayload =
         serde_json::from_slice(&body).map_err(|error| bad_request(error.into()))?;
-    let bundle = b64decode(&request.bundle).map_err(bad_request)?;
+    validate_text(&request.request_id, MAX_ID_BYTES, "request ID").map_err(bad_request)?;
+    validate_text(&request.recipient, MAX_ID_BYTES, "recipient").map_err(bad_request)?;
+    validate_text(&request.sender_name, MAX_LABEL_BYTES, "sender name").map_err(bad_request)?;
+    validate_text(
+        &request.sender_fingerprint,
+        MAX_FINGERPRINT_BYTES,
+        "sender fingerprint",
+    )
+    .map_err(bad_request)?;
+    let bundle = decode_bounded_base64(
+        &request.bundle,
+        MAX_BUNDLE_BYTES * 2,
+        MAX_BUNDLE_BYTES,
+        "bundle",
+    )
+    .map_err(bad_request)?;
     let db = state.db.lock().await;
     let recipient_exists: Option<String> = db
         .query_row(
@@ -621,6 +823,12 @@ async fn list_contact_requests(
     headers: HeaderMap,
     Query(query): Query<ContactQuery>,
 ) -> Result<axum::Json<Vec<ContactRequestResponse>>, ApiError> {
+    validate_json_accept(&headers).map_err(bad_request)?;
+    if let Some(direction) = query.direction.as_deref() {
+        if direction != "outgoing" {
+            return Err(bad_request(anyhow::anyhow!("invalid contact direction")));
+        }
+    }
     let caller =
         authenticate_request(&state, &headers, "GET", "/v1/contacts/requests", &[], None).await?;
     let db = state.db.lock().await;
@@ -659,6 +867,9 @@ async fn accept_contact_request(
     Path(request_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<axum::Json<ContactRequestResponse>, ApiError> {
+    validate_optional_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(&request_id, MAX_ID_BYTES, "request ID").map_err(bad_request)?;
     let recipient = authenticate_request(
         &state,
         &headers,
@@ -679,6 +890,9 @@ async fn reject_contact_request(
     Path(request_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    validate_optional_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(&request_id, MAX_ID_BYTES, "request ID").map_err(bad_request)?;
     let recipient = authenticate_request(
         &state,
         &headers,
@@ -698,13 +912,39 @@ async fn reject_contact_request(
 }
 
 async fn capabilities() -> impl IntoResponse {
-    axum::Json(json!({"api_version": API_VERSION, "websocket": true, "polling": true}))
+    axum::Json(json!({
+        "api_version": API_VERSION,
+        "websocket": true,
+        "polling": true,
+        "message_representation": {
+            "content_type": "application/octet-stream",
+            "accept": "application/octet-stream",
+            "protocol_version": relay_binary::VERSION,
+            "schema_version": relay_binary::SCHEMA,
+            "max_body_bytes": relay_binary::MAX_BODY,
+            "max_messages": relay_binary::MAX_MESSAGES,
+            "max_recipient_bytes": relay_binary::MAX_RECIPIENT_BYTES,
+            "max_message_id_bytes": relay_binary::MAX_MESSAGE_ID_BYTES,
+            "max_address_bytes": relay_binary::MAX_ADDRESS_BYTES,
+            "max_ciphertext_bytes": relay_binary::MAX_CIPHERTEXT_BYTES,
+        }
+    }))
 }
 
 async fn challenge(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::Json(request): axum::Json<ChallengeRequest>,
 ) -> Result<axum::Json<ChallengeResponse>, ApiError> {
+    require_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(&request.client_id, MAX_ID_BYTES, "client ID").map_err(bad_request)?;
+    validate_text(
+        &request.enrollment_secret,
+        MAX_SECRET_BYTES,
+        "enrollment secret",
+    )
+    .map_err(bad_request)?;
     let challenge = random_bytes::<32>();
     let expires_at = now().saturating_add(300);
     let db = state.db.lock().await;
@@ -715,7 +955,13 @@ async fn challenge(
     let Some((secret_hash, used)) = allowed else {
         return Err(unauthorized());
     };
-    if used != 0 || secret_hash != hash(&request.enrollment_secret) {
+    if used != 0
+        || secret_hash
+            .as_bytes()
+            .ct_eq(hash(&request.enrollment_secret).as_bytes())
+            .unwrap_u8()
+            != 1
+    {
         return Err(unauthorized());
     }
     db.execute(
@@ -731,22 +977,38 @@ async fn challenge(
 
 async fn register(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::Json(request): axum::Json<RegisterRequest>,
 ) -> Result<axum::Json<RegisterResponse>, ApiError> {
-    let db = state.db.lock().await;
-    let (identity_bytes, secret_hash, used): (Vec<u8>, String, i64) = db.query_row(
+    require_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(&request.client_id, MAX_ID_BYTES, "client ID").map_err(bad_request)?;
+    validate_text(&request.device_address, MAX_ID_BYTES, "device address").map_err(bad_request)?;
+    let mut db = state.db.lock().await;
+    let transaction = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(internal)?;
+    let (identity_bytes, secret_hash, used): (Vec<u8>, String, i64) = transaction.query_row(
         "SELECT identity_key, enrollment_secret_hash, enrollment_used FROM allowlist WHERE client_id = ?1 AND status = 'active'",
         params![request.client_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()
         .map_err(internal)?.ok_or_else(unauthorized)?;
     if used != 0 {
         return Err(unauthorized());
     }
-    let identity = IdentityKey::decode(&b64decode(&request.identity_key).map_err(bad_request)?)
-        .map_err(|_| unauthorized())?;
+    let identity = IdentityKey::decode(
+        &decode_bounded_base64(
+            &request.identity_key,
+            MAX_IDENTITY_B64_BYTES,
+            128,
+            "identity key",
+        )
+        .map_err(bad_request)?,
+    )
+    .map_err(|_| unauthorized())?;
     if identity.serialize().as_ref() != identity_bytes.as_slice() {
         return Err(unauthorized());
     }
-    let challenge: (Vec<u8>, i64) = db
+    let challenge: (Vec<u8>, i64) = transaction
         .query_row(
             "SELECT challenge, expires_at FROM challenges WHERE client_id = ?1",
             params![request.client_id],
@@ -758,8 +1020,20 @@ async fn register(
     if challenge.1 < now() as i64 || secret_hash.is_empty() {
         return Err(unauthorized());
     }
-    let bundle = b64decode(&request.bundle).map_err(bad_request)?;
-    let signature = b64decode(&request.signature).map_err(bad_request)?;
+    let bundle = decode_bounded_base64(
+        &request.bundle,
+        MAX_BUNDLE_BYTES * 2,
+        MAX_BUNDLE_BYTES,
+        "bundle",
+    )
+    .map_err(bad_request)?;
+    let signature = decode_bounded_base64(
+        &request.signature,
+        MAX_SIGNATURE_B64_BYTES,
+        256,
+        "signature",
+    )
+    .map_err(bad_request)?;
     let mut signed = REGISTER_DOMAIN.to_vec();
     signed.extend(request.client_id.as_bytes());
     signed.push(0);
@@ -771,17 +1045,21 @@ async fn register(
         return Err(unauthorized());
     }
     let token = random_bytes::<32>();
-    db.execute(
-        "UPDATE allowlist SET enrollment_used = 1, device_address = ?2 WHERE client_id = ?1",
+    let claimed = transaction.execute(
+        "UPDATE allowlist SET enrollment_used = 1, device_address = ?2 WHERE client_id = ?1 AND enrollment_used = 0",
         params![request.client_id, request.device_address],
-    )
-    .map_err(internal)?;
-    db.execute("INSERT OR REPLACE INTO devices(client_id, identity_key, device_address, token_hash, bundle, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![request.client_id, identity_bytes, request.device_address, hash(&b64(&token)), bundle, now() as i64]).map_err(internal)?;
-    db.execute(
-        "DELETE FROM challenges WHERE client_id = ?1",
-        params![request.client_id],
-    )
-    .map_err(internal)?;
+    ).map_err(internal)?;
+    if claimed != 1 {
+        return Err(unauthorized());
+    }
+    transaction.execute("INSERT OR REPLACE INTO devices(client_id, identity_key, device_address, token_hash, bundle, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![request.client_id, identity_bytes, request.device_address, hash(&b64(&token)), bundle, now() as i64]).map_err(internal)?;
+    transaction
+        .execute(
+            "DELETE FROM challenges WHERE client_id = ?1",
+            params![request.client_id],
+        )
+        .map_err(internal)?;
+    transaction.commit().map_err(internal)?;
     Ok(axum::Json(RegisterResponse {
         access_token: b64(&token),
         device_id: request.client_id,
@@ -795,6 +1073,9 @@ async fn publish_bundle(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<axum::Json<BundleResponse>, ApiError> {
+    require_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(&device, MAX_ID_BYTES, "device ID").map_err(bad_request)?;
     let auth = authenticate_request(
         &state,
         &headers,
@@ -806,7 +1087,13 @@ async fn publish_bundle(
     .await?;
     let request: BundleRequest =
         serde_json::from_slice(&body).map_err(|error| bad_request(error.into()))?;
-    let bundle = b64decode(&request.bundle).map_err(bad_request)?;
+    let bundle = decode_bounded_base64(
+        &request.bundle,
+        MAX_BUNDLE_BYTES * 2,
+        MAX_BUNDLE_BYTES,
+        "bundle",
+    )
+    .map_err(bad_request)?;
     let db = state.db.lock().await;
     db.execute(
         "UPDATE devices SET bundle = ?2, last_seen_at = ?3 WHERE client_id = ?1",
@@ -824,6 +1111,8 @@ async fn fetch_bundle(
     Path(device): Path<String>,
     headers: HeaderMap,
 ) -> Result<axum::Json<BundleResponse>, ApiError> {
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(&device, MAX_ID_BYTES, "device ID").map_err(bad_request)?;
     authenticate_request(
         &state,
         &headers,
@@ -854,6 +1143,8 @@ async fn fetch_bundle_by_address(
     Path(address): Path<String>,
     headers: HeaderMap,
 ) -> Result<axum::Json<BundleResponse>, ApiError> {
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(&address, MAX_ID_BYTES, "device address").map_err(bad_request)?;
     let path = format!("/v1/devices/by-address/{address}/bundle");
     authenticate_request(&state, &headers, "GET", &path, &[], None).await?;
     let db = state.db.lock().await;
@@ -876,13 +1167,13 @@ async fn send_message(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<axum::Json<MessageResponse>, ApiError> {
+) -> Result<Response, ApiError> {
+    require_binary_accept(&headers).map_err(bad_request)?;
     let sender =
         authenticate_request(&state, &headers, "POST", "/v1/messages", &body, None).await?;
-    let request: MessageRequest =
-        serde_json::from_slice(&body).map_err(|error| bad_request(error.into()))?;
-    let ciphertext = b64decode(&request.ciphertext).map_err(bad_request)?;
-    if ciphertext.len() > MAX_BODY {
+    let (recipient, message_id, expires_at, ciphertext) =
+        decode_message_request(&headers, &body).map_err(bad_request)?;
+    if ciphertext.len() > relay_binary::MAX_CIPHERTEXT_BYTES {
         return Err(ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
             "message is too large".into(),
@@ -892,19 +1183,19 @@ async fn send_message(
     let recipient_id: String = db
         .query_row(
             "SELECT client_id FROM devices WHERE client_id = ?1 OR device_address = ?1",
-            params![request.recipient],
+            params![recipient],
             |row| row.get(0),
         )
         .optional()
         .map_err(internal)?
         .ok_or_else(not_found)?;
     let accepted_at = now();
-    let result = db.execute("INSERT OR IGNORE INTO messages(sender, recipient, client_message_id, ciphertext, accepted_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![sender, recipient_id, request.message_id, ciphertext, accepted_at as i64, request.expires_at.map(|x| x as i64)]).map_err(internal)?;
+    let result = db.execute("INSERT OR IGNORE INTO messages(sender, recipient, client_message_id, ciphertext, accepted_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![sender, recipient_id, message_id, ciphertext, accepted_at as i64, expires_at.map(|x| x as i64)]).map_err(internal)?;
     if result == 0 {
         let existing = db
             .query_row(
                 "SELECT messages.server_id, messages.sender, devices.device_address, messages.client_message_id, messages.ciphertext, messages.accepted_at, messages.expires_at FROM messages LEFT JOIN devices ON devices.client_id = messages.sender WHERE messages.sender = ?1 AND messages.recipient = ?2 AND messages.client_message_id = ?3",
-                params![sender, recipient_id, request.message_id],
+                params![sender, recipient_id, message_id],
                 |row| {
                     Ok(MessageResponse {
                         server_id: row.get(0)?,
@@ -920,25 +1211,37 @@ async fn send_message(
             .optional()
             .map_err(internal)?
             .ok_or_else(not_found)?;
-        return Ok(axum::Json(existing));
+        return Ok((
+            StatusCode::OK,
+            [("content-type", "application/octet-stream")],
+            encode_binary_messages(&[existing]).map_err(internal)?,
+        )
+            .into_response());
     }
     let id = db.last_insert_rowid();
-    Ok(axum::Json(MessageResponse {
+    let message = MessageResponse {
         server_id: id,
         sender,
         sender_address: None,
-        message_id: request.message_id,
-        ciphertext: request.ciphertext,
+        message_id,
+        ciphertext: b64(&ciphertext),
         accepted_at,
-        expires_at: request.expires_at,
-    }))
+        expires_at,
+    };
+    Ok((
+        StatusCode::OK,
+        [("content-type", "application/octet-stream")],
+        encode_binary_messages(&[message]).map_err(internal)?,
+    )
+        .into_response())
 }
 
 async fn receive_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<CursorQuery>,
-) -> Result<axum::Json<Vec<MessageResponse>>, ApiError> {
+) -> Result<Response, ApiError> {
+    require_binary_accept(&headers).map_err(bad_request)?;
     let recipient =
         authenticate_request(&state, &headers, "GET", "/v1/messages", &[], None).await?;
     let db = state.db.lock().await;
@@ -961,10 +1264,15 @@ async fn receive_messages(
             })
         })
         .map_err(internal)?;
-    Ok(axum::Json(
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(internal)?,
-    ))
+    let messages = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(internal)?;
+    Ok((
+        StatusCode::OK,
+        [("content-type", "application/octet-stream")],
+        encode_binary_messages(&messages).map_err(internal)?,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -988,6 +1296,13 @@ async fn message_status(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<MessageStatusQuery>,
 ) -> Result<axum::Json<MessageStatusResponse>, ApiError> {
+    validate_json_accept(&headers).map_err(bad_request)?;
+    validate_text(
+        &query.message_id,
+        relay_binary::MAX_MESSAGE_ID_BYTES,
+        "message ID",
+    )
+    .map_err(bad_request)?;
     let sender =
         authenticate_request(&state, &headers, "GET", "/v1/messages/status", &[], None).await?;
     let db = state.db.lock().await;
@@ -1018,6 +1333,8 @@ async fn ack_message(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    require_json_content(&headers).map_err(bad_request)?;
+    validate_json_accept(&headers).map_err(bad_request)?;
     let recipient = authenticate_request(
         &state,
         &headers,
@@ -1082,9 +1399,24 @@ async fn websocket(mut socket: WebSocket, state: AppState, device: String) {
                     continue;
                 }
                 let db = state.db.lock().await;
-                let rows = db.prepare("SELECT messages.server_id, messages.sender, devices.device_address, messages.client_message_id, messages.ciphertext, messages.accepted_at, messages.expires_at FROM messages LEFT JOIN devices ON devices.client_id = messages.sender WHERE messages.recipient = ?1 AND messages.server_id > ?2 AND messages.acknowledged_at IS NULL ORDER BY messages.server_id LIMIT 100").and_then(|mut statement| statement.query_map(params![device, request.cursor], |row| Ok(MessageResponse { server_id: row.get(0)?, sender: row.get(1)?, sender_address: row.get(2)?, message_id: row.get(3)?, ciphertext: b64(&row.get::<_, Vec<u8>>(4)?), accepted_at: row.get::<_, i64>(5)? as u64, expires_at: row.get::<_, Option<i64>>(6)?.map(|x| x as u64) })).and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())).unwrap_or_default();
-                if let Ok(payload) = serde_json::to_string(&rows) {
-                    let _ = socket.send(Message::Text(payload.into())).await;
+                let rows = match db.prepare("SELECT messages.server_id, messages.sender, devices.device_address, messages.client_message_id, messages.ciphertext, messages.accepted_at, messages.expires_at FROM messages LEFT JOIN devices ON devices.client_id = messages.sender WHERE messages.recipient = ?1 AND messages.server_id > ?2 AND messages.acknowledged_at IS NULL ORDER BY messages.server_id LIMIT 100").and_then(|mut statement| statement.query_map(params![device, request.cursor], |row| Ok(MessageResponse { server_id: row.get(0)?, sender: row.get(1)?, sender_address: row.get(2)?, message_id: row.get(3)?, ciphertext: b64(&row.get::<_, Vec<u8>>(4)?), accepted_at: row.get::<_, i64>(5)? as u64, expires_at: row.get::<_, Option<i64>>(6)?.map(|x| x as u64) })).and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        eprintln!("websocket message query failed: {error}");
+                        let _ = socket.send(Message::Text(r#"{"error":"internal server error"}"#.into())).await;
+                        continue;
+                    }
+                };
+                match serde_json::to_string(&rows) {
+                    Ok(payload) => {
+                        let _ = socket.send(Message::Text(payload.into())).await;
+                    }
+                    Err(error) => {
+                        eprintln!("websocket message serialization failed: {error}");
+                        let _ = socket
+                            .send(Message::Text(r#"{"error":"internal server error"}"#.into()))
+                            .await;
+                    }
                 }
             }
             Message::Close(_) => break,
@@ -1134,6 +1466,9 @@ async fn authenticate_request(
     expected_device: Option<&str>,
 ) -> Result<String, ApiError> {
     let token = bearer(headers).ok_or_else(unauthorized)?;
+    if token.is_empty() || token.len() > MAX_SIGNATURE_B64_BYTES {
+        return Err(unauthorized());
+    }
     let db = state.db.lock().await;
     let device: String = db
         .query_row(
@@ -1174,10 +1509,14 @@ async fn verify_signature(
     timestamp: u64,
     signature: &str,
 ) -> Result<(), ApiError> {
-    if timestamp.abs_diff(now()) > 300 || nonce.is_empty() || nonce.len() > 128 {
+    if timestamp.abs_diff(now()) > 300
+        || nonce.is_empty()
+        || nonce.len() > 128
+        || signature.len() > MAX_SIGNATURE_B64_BYTES
+    {
         return Err(unauthorized());
     }
-    let db = state.db.lock().await;
+    let mut db = state.db.lock().await;
     let identity_bytes: Vec<u8> = db
         .query_row(
             "SELECT identity_key FROM devices WHERE client_id = ?1",
@@ -1201,12 +1540,20 @@ async fn verify_signature(
     if !identity.public_key().verify_signature(&signed, &signature) {
         return Err(unauthorized());
     }
-    let inserted = db
+    let transaction = db.transaction().map_err(internal)?;
+    transaction
+        .execute(
+            "DELETE FROM request_nonces WHERE expires_at < ?1",
+            params![now() as i64],
+        )
+        .map_err(internal)?;
+    let inserted = transaction
         .execute(
             "INSERT OR IGNORE INTO request_nonces(client_id, nonce, expires_at) VALUES (?1, ?2, ?3)",
             params![device, nonce, (now() + 600) as i64],
         )
         .map_err(internal)?;
+    transaction.commit().map_err(internal)?;
     if inserted == 0 {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -1324,7 +1671,12 @@ fn add_allowlist(
     enrollment_secret: &str,
     label: &str,
 ) -> anyhow::Result<()> {
-    let identity = b64decode(identity_key)?;
+    validate_text(client_id, MAX_ID_BYTES, "client ID")?;
+    validate_text(fingerprint, MAX_FINGERPRINT_BYTES, "fingerprint")?;
+    validate_text(enrollment_secret, MAX_SECRET_BYTES, "enrollment secret")?;
+    validate_text(label, MAX_LABEL_BYTES, "label")?;
+    let identity =
+        decode_bounded_base64(identity_key, MAX_IDENTITY_B64_BYTES, 128, "identity key")?;
     IdentityKey::decode(&identity).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     db.execute("INSERT INTO allowlist(client_id, identity_key, fingerprint, enrollment_secret_hash, status, label, created_at) VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6)", params![client_id, identity, fingerprint, hash(enrollment_secret), label, now() as i64])?;
     Ok(())
@@ -1365,7 +1717,11 @@ fn bad_request(error: anyhow::Error) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, error.to_string())
 }
 fn internal<E: std::fmt::Display>(error: E) -> ApiError {
-    ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    eprintln!("internal relay error: {error}");
+    ApiError(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal server error".into(),
+    )
 }
 
 #[cfg(test)]
@@ -1513,6 +1869,180 @@ mod tests {
         assert_ne!(payload, [&b"GET"[..], b"/v1/messages"].concat());
     }
 
+    #[test]
+    fn json_and_binary_message_representations_are_equivalent() {
+        let json_message = MessageResponse {
+            server_id: 7,
+            sender: "alice".into(),
+            sender_address: Some("Alice.1".into()),
+            message_id: "message-1".into(),
+            ciphertext: b64(&[0, 1, 255]),
+            accepted_at: 42,
+            expires_at: Some(99),
+        };
+        let json_round_trip: MessageResponse =
+            serde_json::from_value(serde_json::to_value(&json_message).unwrap()).unwrap();
+        let binary =
+            relay_binary::encode_messages(&[binary_message(&json_message).unwrap()]).unwrap();
+        let binary_round_trip = relay_binary::decode_messages(&binary)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(json_round_trip.server_id, binary_round_trip.server_id);
+        assert_eq!(json_round_trip.sender, binary_round_trip.sender);
+        assert_eq!(
+            json_round_trip.sender_address,
+            binary_round_trip.sender_address
+        );
+        assert_eq!(json_round_trip.message_id, binary_round_trip.message_id);
+        assert_eq!(json_round_trip.accepted_at, binary_round_trip.accepted_at);
+        assert_eq!(json_round_trip.expires_at, binary_round_trip.expires_at);
+        assert_eq!(
+            URL_SAFE_NO_PAD.decode(json_round_trip.ciphertext).unwrap(),
+            binary_round_trip.ciphertext
+        );
+    }
+
+    #[test]
+    fn invalid_stored_ciphertext_is_not_replaced_with_empty_bytes() {
+        let message = MessageResponse {
+            server_id: 1,
+            sender: "alice".into(),
+            sender_address: None,
+            message_id: "message".into(),
+            ciphertext: "not-base64!".into(),
+            accepted_at: 1,
+            expires_at: None,
+        };
+        assert!(binary_message(&message).is_err());
+    }
+
+    #[test]
+    fn unsupported_message_media_types_are_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/plain".parse().unwrap());
+        assert!(decode_message_request(&headers, b"{}").is_err());
+        headers.insert("content-type", "application/json".parse().unwrap());
+        assert!(decode_message_request(&headers, b"{}").is_err());
+        headers.clear();
+        headers.insert("accept", "text/plain".parse().unwrap());
+        assert!(wants_binary(&headers).is_err());
+        headers.insert("accept", "application/octet-stream;q=0".parse().unwrap());
+        assert!(wants_binary(&headers).is_err());
+    }
+
+    #[test]
+    fn response_negotiation_does_not_follow_request_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/octet-stream".parse().unwrap());
+        headers.insert("accept", "application/json".parse().unwrap());
+        assert!(require_binary_accept(&headers).is_err());
+    }
+
+    #[test]
+    fn internal_errors_are_not_returned_to_clients() {
+        let error = internal("database is locked at /secret/path");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.1, "internal server error");
+    }
+
+    #[tokio::test]
+    async fn expired_nonces_are_cleaned_when_a_signed_request_is_verified() {
+        let database = test_database();
+        let mut rng = rand::rng();
+        let identity = IdentityKeyPair::generate(&mut rng);
+        let identity_bytes = identity.identity_key().serialize();
+        database.execute(
+            "INSERT INTO allowlist (client_id, identity_key, fingerprint, enrollment_secret_hash, status, label, created_at) VALUES ('client', ?1, 'fp', 'hash', 'active', 'client', ?2)",
+            params![identity_bytes.as_ref(), now()],
+        ).unwrap();
+        database.execute(
+            "INSERT INTO devices (client_id, identity_key, device_address, token_hash, bundle, last_seen_at) VALUES ('client', ?1, 'Client.1', 'token', 'bundle', ?2)",
+            params![identity_bytes.as_ref(), now()],
+        ).unwrap();
+        database.execute(
+            "INSERT INTO request_nonces (client_id, nonce, expires_at) VALUES ('client', 'expired', ?1)",
+            params![now() as i64 - 1],
+        ).unwrap();
+        let body = b"body";
+        let timestamp = now();
+        let nonce = "fresh";
+        let mut signed = REQUEST_DOMAIN.to_vec();
+        signed.extend(b"GET");
+        signed.push(0);
+        signed.extend(b"/v1/test");
+        signed.push(0);
+        signed.extend(Sha256::digest(body));
+        signed.extend(nonce.as_bytes());
+        signed.push(0);
+        signed.extend(timestamp.to_be_bytes());
+        let signature = identity
+            .private_key()
+            .calculate_signature(&signed, &mut rng)
+            .unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(database)),
+            admin_token: None,
+        };
+        verify_signature(
+            &state,
+            "client",
+            "GET",
+            "/v1/test",
+            body,
+            nonce,
+            timestamp,
+            &b64(&signature),
+        )
+        .await
+        .unwrap();
+        let db = state.db.lock().await;
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM request_nonces WHERE nonce = 'expired'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn duplicate_message_ids_are_idempotently_stored_once() {
+        let database = test_database();
+        let first = database.execute(
+            "INSERT INTO messages (sender, recipient, client_message_id, ciphertext, accepted_at) VALUES ('a', 'b', 'm', ?1, 1)",
+            params![b"cipher"],
+        ).unwrap();
+        let second = database.execute(
+            "INSERT OR IGNORE INTO messages (sender, recipient, client_message_id, ciphertext, accepted_at) VALUES ('a', 'b', 'm', ?1, 2)",
+            params![b"other"],
+        ).unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(second, 0);
+        let ciphertext: Vec<u8> = database.query_row("SELECT ciphertext FROM messages WHERE sender = 'a' AND recipient = 'b' AND client_message_id = 'm'", [], |row| row.get(0)).unwrap();
+        assert_eq!(ciphertext, b"cipher");
+    }
+
+    #[tokio::test]
+    async fn capabilities_advertise_binary_contract_and_limits() {
+        let response = capabilities().await.into_response();
+        let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["message_representation"]["protocol_version"],
+            relay_binary::VERSION
+        );
+        assert_eq!(
+            value["message_representation"]["schema_version"],
+            relay_binary::SCHEMA
+        );
+        assert_eq!(
+            value["message_representation"]["max_messages"],
+            relay_binary::MAX_MESSAGES
+        );
+    }
+
     #[tokio::test]
     async fn http_registration_and_queue_flow_requires_signed_requests() {
         let database = test_database();
@@ -1601,14 +2131,18 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         *request.headers_mut() = headers;
+        request
+            .headers_mut()
+            .insert("accept", "application/octet-stream".parse().unwrap());
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let message_body = serde_json::to_vec(&json!({
-            "recipient": client_id,
-            "message_id": "message-1",
-            "ciphertext": b64(b"opaque-ciphertext")
-        }))
+        let message_body = relay_binary::encode_submit(&relay_binary::Submit {
+            recipient: client_id.into(),
+            message_id: "message-1".into(),
+            expires_at: None,
+            ciphertext: b"opaque-ciphertext".to_vec(),
+        })
         .unwrap();
         let replay_body = message_body.clone();
         let (headers, nonce) = signed_headers(
@@ -1619,6 +2153,9 @@ mod tests {
             &message_body,
             "nonce-message",
         );
+        let mut headers = headers;
+        headers.insert("content-type", "application/octet-stream".parse().unwrap());
+        headers.insert("accept", "application/octet-stream".parse().unwrap());
         let mut request = Request::post("/v1/messages")
             .body(axum::body::Body::from(message_body))
             .unwrap();
@@ -1640,6 +2177,8 @@ mod tests {
             &[],
             "nonce-receive",
         );
+        let mut headers = headers;
+        headers.insert("accept", "application/octet-stream".parse().unwrap());
         let mut request = Request::get("/v1/messages?cursor=0")
             .body(axum::body::Body::empty())
             .unwrap();
@@ -1647,9 +2186,23 @@ mod tests {
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let response_body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
-        let messages: Vec<MessageResponse> = serde_json::from_slice(&response_body).unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].message_id, "message-1");
+        assert!(response_body.len() >= 5);
+        assert_eq!(
+            u16::from_be_bytes(response_body[..2].try_into().unwrap()),
+            relay_binary::VERSION
+        );
+        assert_eq!(
+            u16::from_be_bytes(response_body[2..4].try_into().unwrap()),
+            relay_binary::SCHEMA
+        );
+        assert_eq!(response_body[4], relay_binary::KIND_MESSAGES);
+        assert!(
+            response_body
+                .windows(b"message-1".len())
+                .any(|window| window == b"message-1")
+        );
+        let received_server_id =
+            i64::from_be_bytes(response_body[5 + 4..5 + 12].try_into().unwrap());
 
         let (headers, _) = signed_headers(
             &identity,
@@ -1670,7 +2223,7 @@ mod tests {
         assert_eq!(status.status, "sent");
 
         let ack_body = br#"{"acknowledged":true}"#.to_vec();
-        let ack_path = format!("/v1/messages/{}/ack", messages[0].server_id);
+        let ack_path = format!("/v1/messages/{}/ack", received_server_id);
         let (headers, _) = signed_headers(
             &identity,
             &registered.access_token,
@@ -1683,6 +2236,9 @@ mod tests {
             .body(axum::body::Body::from(ack_body))
             .unwrap();
         *request.headers_mut() = headers;
+        request
+            .headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -1716,6 +2272,12 @@ mod tests {
             .body(axum::body::Body::from(replay_body))
             .unwrap();
         *request.headers_mut() = headers;
+        request
+            .headers_mut()
+            .insert("content-type", "application/octet-stream".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("accept", "application/octet-stream".parse().unwrap());
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
@@ -1765,6 +2327,9 @@ mod tests {
             "n1",
         )
         .0;
+        request
+            .headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let mut request = Request::get("/v1/contacts/requests")

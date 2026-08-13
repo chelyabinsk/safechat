@@ -7,6 +7,7 @@ edition = "2024"
 age = "0.11"
 anyhow = "1.0"
 base64 = "0.22"
+flate2 = "1.1"
 futures-executor = "0.3"
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
 serde = { version = "1.0", features = ["derive"] }

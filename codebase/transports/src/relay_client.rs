@@ -11,6 +11,7 @@ use safechat_core::signal_adapter::SignalPreKeyBundle;
 use safechat_core::transport::{
     ContactRequest, DeliveryStatus, MessageTransport, TransportMessage,
 };
+use safechat_relay_protocol as relay_binary;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -22,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const REGISTER_DOMAIN: &[u8] = b"safechat-relay-register-v1\0";
 const REQUEST_DOMAIN: &[u8] = b"safechat-relay-request-v1\0";
 const ENROLLMENT_REQUEST_DOMAIN: &[u8] = b"safechat-relay-enrollment-request-v1\0";
-const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = relay_binary::MAX_BODY;
 const MAX_REQUEST_ATTEMPTS: usize = 4;
 
 #[derive(Clone, Debug)]
@@ -41,13 +42,13 @@ pub struct RelayClient {
     access_token: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayMessage {
     pub server_id: i64,
     pub sender: String,
     pub sender_address: Option<String>,
     pub message_id: String,
-    pub ciphertext: String,
+    pub ciphertext: Vec<u8>,
     pub accepted_at: u64,
     pub expires_at: Option<u64>,
 }
@@ -264,24 +265,27 @@ impl RelayClient {
         ciphertext: &[u8],
         expires_at: Option<u64>,
     ) -> Result<RelayMessage> {
-        self.signed_json(
-            Method::POST,
-            "/v1/messages",
-            json!({
-                "recipient": recipient,
-                "message_id": message_id,
-                "ciphertext": encode(ciphertext),
-                "expires_at": expires_at,
-            }),
-        )
+        let body = relay_binary::encode_submit(&relay_binary::Submit {
+            recipient: recipient.to_owned(),
+            message_id: message_id.to_owned(),
+            expires_at,
+            ciphertext: ciphertext.to_vec(),
+        })?;
+        let response = self.signed_binary(Method::POST, "/v1/messages", body, true)?;
+        parse_binary_messages(&response)?
+            .into_iter()
+            .next()
+            .context("relay returned no sent message")
     }
 
     pub fn receive_messages(&self, cursor: i64) -> Result<Vec<RelayMessage>> {
-        self.signed_json(
+        let response = self.signed_binary(
             Method::GET,
             &format!("/v1/messages?cursor={cursor}"),
-            serde_json::Value::Null,
-        )
+            Vec::new(),
+            false,
+        )?;
+        parse_binary_messages(&response)
     }
 
     pub fn acknowledge(&self, server_id: i64) -> Result<()> {
@@ -434,6 +438,63 @@ impl RelayClient {
         })?)
     }
 
+    fn signed_binary(
+        &self,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+        send_body: bool,
+    ) -> Result<Vec<u8>> {
+        let token = self
+            .access_token
+            .as_deref()
+            .context("relay client is not registered")?;
+        let signed_path = path.split('?').next().unwrap_or(path);
+        let body_for_request = body.clone();
+        let method_for_request = method.clone();
+        let response = send_with_retry(|| {
+            let nonce = random_nonce();
+            let timestamp = now();
+            let mut signed = REQUEST_DOMAIN.to_vec();
+            signed.extend(method_for_request.as_str().as_bytes());
+            signed.push(0);
+            signed.extend(signed_path.as_bytes());
+            signed.push(0);
+            signed.extend(Sha256::digest(&body_for_request));
+            signed.extend(nonce.as_bytes());
+            signed.push(0);
+            signed.extend(timestamp.to_be_bytes());
+            let mut rng = OsRng.unwrap_err();
+            let signature = self
+                .identity_pair
+                .private_key()
+                .calculate_signature(&signed, &mut rng)?;
+            let mut request = self
+                .http
+                .request(method_for_request.clone(), self.url(path)?)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("x-safechat-nonce", &nonce)
+                .header("x-safechat-timestamp", timestamp.to_string())
+                .header("x-safechat-signature", encode(&signature))
+                .header(header::ACCEPT, "application/octet-stream");
+            if send_body {
+                request = request
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(body_for_request.clone());
+            }
+            Ok(request)
+        })?;
+        let status = response.status();
+        let bytes = response.bytes().context("reading relay response")?;
+        if status != StatusCode::OK {
+            bail!(
+                "relay request failed with {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        Ok(bytes.to_vec())
+    }
+
     fn url(&self, path: &str) -> Result<Url> {
         Ok(Url::parse(&format!("{}{}", self.config.base_url, path))?)
     }
@@ -460,7 +521,7 @@ impl MessageTransport for RelayClient {
                     sender: message.sender,
                     sender_address: message.sender_address,
                     message_id: message.message_id,
-                    ciphertext: decode(&message.ciphertext)?,
+                    ciphertext: message.ciphertext,
                     accepted_at: message.accepted_at,
                     expires_at: message.expires_at,
                 })
@@ -499,6 +560,23 @@ fn parse_json<T: DeserializeOwned>(response: Response) -> Result<T> {
         );
     }
     Ok(serde_json::from_slice(&body)?)
+}
+
+fn parse_binary_messages(input: &[u8]) -> Result<Vec<RelayMessage>> {
+    relay_binary::decode_messages(input).map(|messages| {
+        messages
+            .into_iter()
+            .map(|message| RelayMessage {
+                server_id: message.server_id,
+                sender: message.sender,
+                sender_address: message.sender_address,
+                message_id: message.message_id,
+                ciphertext: message.ciphertext,
+                accepted_at: message.accepted_at,
+                expires_at: message.expires_at,
+            })
+            .collect()
+    })
 }
 
 fn send_with_retry<F>(mut build: F) -> Result<Response>
@@ -572,6 +650,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn binary_message_response_round_trips_raw_ciphertext() {
+        let message = RelayMessage {
+            server_id: 7,
+            sender: "alice".to_owned(),
+            sender_address: Some("Alice.1".to_owned()),
+            message_id: "message-1".to_owned(),
+            ciphertext: vec![0, 1, 2, 255],
+            accepted_at: 42,
+            expires_at: Some(99),
+        };
+        let encoded = encode_test_binary_messages(&[message.clone()]);
+        assert_eq!(parse_binary_messages(&encoded).unwrap(), vec![message]);
+    }
+
+    #[test]
+    fn binary_message_response_rejects_trailing_bytes() {
+        let mut encoded = encode_test_binary_messages(&[]);
+        encoded.push(0);
+        assert!(parse_binary_messages(&encoded).is_err());
+    }
+
+    fn encode_test_binary_messages(messages: &[RelayMessage]) -> Vec<u8> {
+        relay_binary::encode_messages(
+            &messages
+                .iter()
+                .map(|message| relay_binary::Message {
+                    server_id: message.server_id,
+                    sender: message.sender.clone(),
+                    sender_address: message.sender_address.clone(),
+                    message_id: message.message_id.clone(),
+                    accepted_at: message.accepted_at,
+                    expires_at: message.expires_at,
+                    ciphertext: message.ciphertext.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
     fn relay_requires_https_by_default() {
         let pair = IdentityKeyPair::generate(&mut OsRng.unwrap_err());
         assert!(
@@ -627,5 +745,24 @@ mod tests {
         assert!(!retryable_status(StatusCode::NOT_FOUND));
         assert_eq!(retry_delay(0), Duration::from_millis(250));
         assert_eq!(retry_delay(3), Duration::from_millis(2_000));
+    }
+
+    #[test]
+    fn binary_message_parser_preserves_ciphertext_bytes() {
+        let ciphertext = [0, 1, 2, 250, 255];
+        let packet = relay_binary::encode_messages(&[relay_binary::Message {
+            server_id: 7,
+            sender: "alice".into(),
+            sender_address: Some("alice.1".into()),
+            message_id: "message-7".into(),
+            accepted_at: 12,
+            expires_at: None,
+            ciphertext: ciphertext.to_vec(),
+        }])
+        .unwrap();
+
+        let messages = parse_binary_messages(&packet).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].ciphertext, ciphertext);
     }
 }

@@ -50,8 +50,31 @@ The client then calls `/v1/devices/challenge`, signs the returned challenge
 with its identity key, and calls `/v1/devices/register` to receive an access
 token.
 
-Messages are queued with `POST /v1/messages`. The recipient retrieves and
-acknowledges them with `GET /v1/messages` and `POST /v1/messages/{server_id}/ack`.
+Messages are queued with `POST /v1/messages`. SafeChat clients use the binary
+wire form: send an `application/octet-stream` body and request binary responses
+with `Accept: application/octet-stream`. The send body is:
+
+```text
+protocol version 1, schema version 1, and a frame kind (the compact five-byte
+header is not preceded by a textual magic prefix). The shared safechat-relay-protocol crate owns
+the binary layout; binary is used only for message submission/retrieval.
+recipient: u32-be length + UTF-8 bytes
+message_id: u32-be length + UTF-8 bytes
+expiration: u8 (0 = absent, 1 = present) + optional u64-be seconds
+ciphertext: u32-be length + raw bytes
+```
+
+Responses use the same version/schema header and messages frame kind,
+followed by a u32-be record count and records with fixed integer fields,
+length-prefixed UTF-8 metadata, and a u32-be ciphertext length followed by raw
+ciphertext. This removes JSON and Base64 overhead from the high-volume message
+path. Registration, bundles, contacts, acknowledgements, status, and
+administration remain JSON control-plane endpoints. Message submission and
+retrieval require the binary media type; legacy JSON message bodies and
+responses are not accepted.
+The recipient retrieves and
+acknowledges messages with `GET /v1/messages` and
+`POST /v1/messages/{server_id}/ack`.
 The sender can query `GET /v1/messages/status?message_id=...`; the status is
 `sent` until the recipient acknowledges the message, then becomes `read`.
 

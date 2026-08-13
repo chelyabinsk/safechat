@@ -2814,6 +2814,7 @@ dependencies = [
  "safechat-transports",
  "serde",
  "serde_json",
+ "safechat-relay-protocol",
  "sha2 0.10.9",
 ]
 
@@ -2833,6 +2834,7 @@ dependencies = [
  "age",
  "anyhow",
  "base64 0.22.1",
+ "flate2",
  "futures-executor",
  "libsignal-protocol",
  "rand 0.9.5",
@@ -2859,7 +2861,9 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "safechat-relay-protocol",
  "sha2 0.10.9",
+ "subtle",
  "tokio",
  "tower",
 ]
@@ -2874,9 +2878,17 @@ dependencies = [
  "rand 0.9.5",
  "reqwest",
  "safechat-core",
+ "safechat-relay-protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "safechat-relay-protocol"
+version = "0.2.5"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

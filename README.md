@@ -191,7 +191,7 @@ For copy/paste chat, use the shortcuts directly at the prompt:
 
 ```text
 /s hello Bob
-/r safechat-text-v1:...
+/r <URL-safe Base64 ciphertext>
 ```
 
 In copy/paste mode, `/s` prints the ciphertext in the chat and `/r` prints the
@@ -240,7 +240,8 @@ The low-level `safechat signal ...` commands also prompt for the encrypted
 database password. Existing plaintext `identity.db` files are rejected and
 must be migrated before use; they are never silently overwritten.
 
-For text-only transports, the UI displays URL-safe Base64 ciphertext; this does
+For text-only transports, the UI displays unlabelled URL-safe Base64
+ciphertext; the selected paste context determines how it is decoded. This does
 not replace encryption or authentication.
 
 ## Other current commands
