@@ -15,6 +15,23 @@ flatpak run org.flatpak.Builder --user --install --force-clean \
 flatpak run io.safechat.SafeChat
 ```
 
+At startup, select a saved profile or choose **Create new profile**. Each
+profile has its own encrypted identity database. Multiple local clients can
+run at the same time by launching the application twice and selecting a
+different profile in each window.
+
+```sh
+flatpak run io.safechat.SafeChat
+flatpak run io.safechat.SafeChat
+```
+
+Use separate terminal windows for the two commands. Create different display
+names and passwords in each window; do not reuse an identity database when
+testing two users.
+
+The selected profile name is shown in the application header. Flatpak stores
+these profiles under `~/.var/app/io.safechat.SafeChat/data/safechat/`.
+
 The manifest currently permits network access during the Cargo dependency
 build. Release CI should vendor or prefetch Cargo sources and remove that
 permission before publishing artifacts. The Flatpak packages the current UI
