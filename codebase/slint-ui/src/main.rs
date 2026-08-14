@@ -5,10 +5,23 @@ mod ui_service;
 use arboard::Clipboard;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use ui_service::{Command, Event, UiService, available_profiles};
+use ui_service::{
+    Command, ConversationMessage, Event, TransportKind, UiService, available_profiles,
+};
 
 fn set_chat_messages(window: &MainWindow, messages: Vec<ChatMessage>) {
     window.set_chat_messages(slint::ModelRc::new(slint::VecModel::from(messages)));
+}
+
+fn to_slint_message(message: ConversationMessage) -> ChatMessage {
+    ChatMessage {
+        sender: message.sender.into(),
+        text: message.text.into(),
+        timestamp: message.timestamp.to_string().into(),
+        outgoing: message.outgoing,
+        status: message.status.into(),
+        ciphertext: message.ciphertext.into(),
+    }
 }
 
 fn set_status(window: &MainWindow, message: impl Into<slint::SharedString>) {
@@ -66,7 +79,7 @@ fn apply_event(window: &MainWindow, event: Event) {
             status,
             ciphertext,
         } => {
-            set_chat_messages(window, messages);
+            set_chat_messages(window, messages.into_iter().map(to_slint_message).collect());
             window.set_chat_loading(false);
             if let Some(ciphertext) = ciphertext {
                 set_status(
@@ -205,9 +218,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 set_status(&window, "Type a message first.");
             } else {
                 set_status(&window, "Encrypting and sending…");
+                let Some(transport) = TransportKind::parse(&window.get_selected_transport()) else {
+                    set_status(&window, "Unsupported transport selected.");
+                    return;
+                };
                 let command = Command::Send {
                     peer,
-                    transport: window.get_selected_transport().to_string(),
+                    transport,
                     text: message.to_string(),
                 };
                 if let Err(error) = service_for_send.submit(command) {

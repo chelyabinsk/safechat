@@ -4,25 +4,28 @@
 //! encrypted history, and relay operations therefore never run concurrently
 //! because several UI callbacks happened close together.
 
-use crate::ChatMessage;
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use directories::ProjectDirs;
 use safechat::chat_service::{ChatEvent, ChatService};
 use safechat::profile_store::{
-    EncryptedHistoryStore, HistoryEntry, HistoryFile, HistoryStore, load_relay_config,
-    load_relay_peer_ids, load_relay_token,
+    EncryptedHistoryStore, HistoryEntry, HistoryStore, load_relay_config, load_relay_peer_ids,
+    load_relay_token,
 };
 use safechat::relay_client::{RelayClient, RelayClientConfig};
 use safechat::relay_transport::RelayTransport;
 use safechat::signal_adapter::{SignalPreKeyBundle, SqliteSignalState, identity_fingerprint};
 use safechat::transport::{BundleTransport, TextTransport};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
-use std::thread;
 
-const COMMAND_QUEUE_SIZE: usize = 16;
+mod chat;
+mod model;
+mod profile;
+mod worker;
+use chat::render_history;
+pub use model::{ConversationMessage, TransportKind};
+pub use profile::available_profiles;
+pub use worker::UiService;
 
 #[derive(Clone, Debug)]
 pub struct ProfileSession {
@@ -47,7 +50,7 @@ pub enum Command {
     },
     Send {
         peer: String,
-        transport: String,
+        transport: TransportKind,
         text: String,
     },
     ReceivePasted {
@@ -72,7 +75,7 @@ pub enum Event {
         status: String,
     },
     ChatUpdated {
-        messages: Vec<ChatMessage>,
+        messages: Vec<ConversationMessage>,
         status: String,
         ciphertext: Option<String>,
     },
@@ -80,76 +83,6 @@ pub enum Event {
         operation: &'static str,
         message: String,
     },
-}
-
-pub struct UiService {
-    commands: SyncSender<Command>,
-    events: Arc<Mutex<Receiver<Event>>>,
-}
-
-impl UiService {
-    pub fn new() -> Self {
-        let (commands, command_rx) = mpsc::sync_channel(COMMAND_QUEUE_SIZE);
-        let (event_tx, event_rx) = mpsc::channel();
-        thread::spawn(move || worker_loop(command_rx, event_tx));
-        Self {
-            commands,
-            events: Arc::new(Mutex::new(event_rx)),
-        }
-    }
-
-    pub fn submit(&self, command: Command) -> Result<()> {
-        self.commands
-            .try_send(command)
-            .map_err(|error| match error {
-                TrySendError::Full(_) => anyhow::anyhow!("client operation queue is busy"),
-                TrySendError::Disconnected(_) => anyhow::anyhow!("client worker stopped"),
-            })
-    }
-
-    pub fn try_submit(&self, command: Command) -> bool {
-        self.commands.try_send(command).is_ok()
-    }
-
-    pub fn drain_events(&self) -> Vec<Event> {
-        let Ok(events) = self.events.lock() else {
-            return Vec::new();
-        };
-        events.try_iter().collect()
-    }
-}
-
-pub fn available_profiles() -> Result<Vec<String>> {
-    let root = profile_root()?;
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut profiles = std::fs::read_dir(root)?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.is_dir() && path.join("identity.db").is_file())
-                .then(|| entry.file_name().to_string_lossy().into_owned())
-        })
-        .collect::<Vec<_>>();
-    profiles.sort();
-    Ok(profiles)
-}
-
-fn worker_loop(commands: Receiver<Command>, events: mpsc::Sender<Event>) {
-    let mut session = None;
-    while let Ok(command) = commands.recv() {
-        let result = handle_command(&mut session, command);
-        match result {
-            Err((operation, message)) => {
-                let _ = events.send(Event::Error { operation, message });
-            }
-            Ok(Some(event)) => {
-                let _ = events.send(event);
-            }
-            Ok(None) => {}
-        }
-    }
 }
 
 fn handle_command(
@@ -202,7 +135,7 @@ fn handle_command(
             transport,
             text,
         } => require_session(session).and_then(|active| {
-            if transport == "Copy/paste" {
+            if transport == TransportKind::CopyPaste {
                 perform_paste_send(active, &peer, &text).map(|(messages, status, ciphertext)| {
                     Some(Event::ChatUpdated {
                         messages,
@@ -422,31 +355,11 @@ fn open_relay_transport(
     ))
 }
 
-fn render_history(history: &HistoryFile) -> Vec<ChatMessage> {
-    history
-        .entries
-        .iter()
-        .map(|entry| ChatMessage {
-            sender: if entry.sender == "you" {
-                "You"
-            } else {
-                &entry.sender
-            }
-            .into(),
-            text: entry.text.clone().into(),
-            timestamp: entry.timestamp.to_string().into(),
-            outgoing: entry.sender == "you",
-            status: entry.delivery_status.clone().into(),
-            ciphertext: entry.ciphertext.clone().into(),
-        })
-        .collect()
-}
-
 fn perform_paste_send(
     session: &ProfileSession,
     encoded_peer: &str,
     plaintext: &str,
-) -> Result<(Vec<ChatMessage>, String, String)> {
+) -> Result<(Vec<ConversationMessage>, String, String)> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
     let database = profile_database(&session.profile)?;
     let mut state =
@@ -480,7 +393,7 @@ fn perform_paste_receive(
     session: &ProfileSession,
     encoded_peer: &str,
     encoded_ciphertext: &str,
-) -> Result<(Vec<ChatMessage>, String)> {
+) -> Result<(Vec<ConversationMessage>, String)> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
     let database = profile_database(&session.profile)?;
     let mut state =
@@ -518,7 +431,10 @@ fn perform_paste_receive(
     ))
 }
 
-fn load_chat_history(session: &ProfileSession, encoded_peer: &str) -> Result<Vec<ChatMessage>> {
+fn load_chat_history(
+    session: &ProfileSession,
+    encoded_peer: &str,
+) -> Result<Vec<ConversationMessage>> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
     let (_, _, _, lobby_root) = chat_paths(&session.profile)?;
     let mut history_store = EncryptedHistoryStore::new(&lobby_root, &session.password)?;
@@ -531,7 +447,7 @@ fn perform_chat_action(
     session: &ProfileSession,
     encoded_peer: &str,
     plaintext: Option<&str>,
-) -> Result<(Vec<ChatMessage>, String)> {
+) -> Result<(Vec<ConversationMessage>, String)> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
     let database = profile_database(&session.profile)?;
     let mut state =
