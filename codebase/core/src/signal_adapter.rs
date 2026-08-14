@@ -1807,6 +1807,28 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_trust_is_idempotent_and_survives_sqlite_reopen() {
+        futures_executor::block_on(async {
+            let (mut alice, bob, _alice_bundle, bob_bundle, alice_path, bob_path) =
+                paired_states("duplicate-trust").await;
+            alice.trust_bundle(&bob_bundle).await.unwrap();
+            drop(alice);
+            drop(bob);
+
+            let mut reopened = SqliteSignalState::open(&alice_path, "password")
+                .await
+                .unwrap();
+            let recipient = reopened.encrypt_for(&bob_bundle, b"after reopen").await;
+            assert!(
+                recipient.is_ok(),
+                "duplicate trust must not break the session"
+            );
+            drop(reopened);
+            cleanup_paths(&[&alice_path, &bob_path]);
+        });
+    }
+
+    #[test]
     fn ratchet_update_can_be_retried_after_persist_failure() {
         let _lock = FAILPOINT_LOCK.lock().unwrap();
         futures_executor::block_on(async {

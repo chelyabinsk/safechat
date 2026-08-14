@@ -49,8 +49,15 @@ fn worker_loop(commands: Receiver<Command>, events: mpsc::Sender<Event>) {
     let mut session: Option<ProfileSession> = None;
     while let Ok(command) = commands.recv() {
         match handle_command(&mut session, command) {
-            Err((operation, message)) => {
-                let _ = events.send(Event::Error { operation, message });
+            Err(error) => {
+                eprintln!(
+                    "safechat UI {} operation failed: {:#}",
+                    error.operation, error.source
+                );
+                let _ = events.send(Event::Error {
+                    operation: error.operation,
+                    message: "operation failed; see the application log for details".to_owned(),
+                });
             }
             Ok(Some(event)) => {
                 let _ = events.send(event);

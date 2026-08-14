@@ -288,3 +288,143 @@ fn restrict_file(path: &Path) -> Result<()> {
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "safechat-profile-store-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is before unix epoch")
+                .as_nanos()
+        ))
+    }
+
+    fn entry(message_id: &str, peer: &str, text: &str) -> HistoryEntry {
+        HistoryEntry {
+            timestamp: 42,
+            sender: "alice".to_owned(),
+            text: text.to_owned(),
+            message_id: message_id.to_owned(),
+            peer: peer.to_owned(),
+            ciphertext: "ciphertext".to_owned(),
+            delivery_status: "sent".to_owned(),
+            transport_recipient: peer.to_owned(),
+        }
+    }
+
+    #[test]
+    fn encrypted_history_survives_reopen_and_keeps_conversations_isolated() {
+        let root = test_root("reopen");
+        let mut first =
+            EncryptedHistoryStore::new(&root, "correct horse").expect("create history store");
+        let mut alice_history = HistoryFile {
+            version: PROFILE_VERSION,
+            entries: vec![entry("m1", "alice", "hello")],
+            transport_cursor: 17,
+        };
+        first
+            .save("alice", &alice_history)
+            .expect("save alice history");
+        first
+            .save(
+                "bob",
+                &HistoryFile {
+                    version: PROFILE_VERSION,
+                    entries: vec![entry("m2", "bob", "different conversation")],
+                    transport_cursor: 3,
+                },
+            )
+            .expect("save bob history");
+        drop(first);
+
+        let mut reopened =
+            EncryptedHistoryStore::new(&root, "correct horse").expect("reopen history store");
+        let loaded_alice = reopened.load("alice").expect("load alice history");
+        assert_eq!(loaded_alice.transport_cursor, 17);
+        assert_eq!(loaded_alice.entries[0].message_id, "m1");
+        assert_eq!(
+            reopened.load("bob").expect("load bob history").entries[0].message_id,
+            "m2"
+        );
+        assert!(
+            reopened
+                .load("missing")
+                .expect("load missing history")
+                .entries
+                .is_empty()
+        );
+
+        alice_history.transport_cursor = 18;
+        alice_history.entries.push(entry("m3", "alice", "second"));
+        reopened
+            .save("alice", &alice_history)
+            .expect("update alice history");
+        let updated = reopened.load("alice").expect("reload updated history");
+        assert_eq!(updated.transport_cursor, 18);
+        assert_eq!(updated.entries.len(), 2);
+
+        std::fs::remove_dir_all(root).expect("remove test history");
+    }
+
+    #[test]
+    fn encrypted_history_rejects_wrong_password_without_overwriting_data() {
+        let root = test_root("password");
+        let mut store = EncryptedHistoryStore::new(&root, "right password").expect("create store");
+        store
+            .save(
+                "peer",
+                &HistoryFile {
+                    version: PROFILE_VERSION,
+                    entries: vec![entry("m1", "peer", "secret")],
+                    transport_cursor: 1,
+                },
+            )
+            .expect("save history");
+        drop(store);
+
+        let wrong = EncryptedHistoryStore::new(&root, "wrong password");
+        assert!(
+            wrong.is_err(),
+            "wrong password must not create a new identity"
+        );
+        let mut correct =
+            EncryptedHistoryStore::new(&root, "right password").expect("reopen store");
+        assert_eq!(
+            correct.load("peer").expect("load history").entries[0].text,
+            "secret"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test history");
+    }
+
+    #[test]
+    fn encrypted_history_removes_stale_temporary_file_before_save() {
+        let root = test_root("stale-temp");
+        let mut store = EncryptedHistoryStore::new(&root, "password").expect("create store");
+        let path = root.join("peer.age");
+        std::fs::write(root.join("peer.age.tmp"), b"incomplete write").expect("create stale file");
+        store
+            .save(
+                "peer",
+                &HistoryFile {
+                    version: PROFILE_VERSION,
+                    entries: vec![entry("m1", "peer", "complete")],
+                    transport_cursor: 0,
+                },
+            )
+            .expect("replace stale file");
+        assert!(!path.with_extension("age.tmp").exists());
+        assert_eq!(
+            store.load("peer").expect("load saved history").entries[0].text,
+            "complete"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test history");
+    }
+}
