@@ -39,12 +39,16 @@ const MAX_SIGNATURE_B64_BYTES: usize = 512;
 const MAX_BUNDLE_BYTES: usize = 1024 * 1024;
 
 mod auth;
+mod bundles;
 mod contacts;
 mod database;
 mod enrollment;
 mod events;
 mod validation;
 use auth::*;
+use bundles::{
+    fetch as fetch_bundle, fetch_by_address as fetch_bundle_by_address, publish as publish_bundle,
+};
 use contacts::{
     accept as accept_contact_request, create as create_contact_request,
     list as list_contact_requests, reject as reject_contact_request,
@@ -153,17 +157,6 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         (self.0, axum::Json(json!({"error": self.1}))).into_response()
     }
-}
-
-#[derive(Deserialize)]
-struct BundleRequest {
-    bundle: String,
-}
-
-#[derive(Deserialize, Serialize)]
-struct BundleResponse {
-    device_id: String,
-    bundle: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -493,102 +486,6 @@ async fn capabilities() -> impl IntoResponse {
             "max_address_bytes": relay_binary::MAX_ADDRESS_BYTES,
             "max_ciphertext_bytes": relay_binary::MAX_CIPHERTEXT_BYTES,
         }
-    }))
-}
-
-async fn publish_bundle(
-    State(state): State<AppState>,
-    Path(device): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<axum::Json<BundleResponse>, ApiError> {
-    require_json_content(&headers).map_err(bad_request)?;
-    validate_json_accept(&headers).map_err(bad_request)?;
-    validate_text(&device, MAX_ID_BYTES, "device ID").map_err(bad_request)?;
-    let auth = authenticate_request(
-        &state,
-        &headers,
-        "PUT",
-        &format!("/v1/devices/{device}/bundle"),
-        &body,
-        Some(&device),
-    )
-    .await?;
-    let request: BundleRequest =
-        serde_json::from_slice(&body).map_err(|error| bad_request(error.into()))?;
-    let bundle = decode_bounded_base64(
-        &request.bundle,
-        MAX_BUNDLE_BYTES * 2,
-        MAX_BUNDLE_BYTES,
-        "bundle",
-    )
-    .map_err(bad_request)?;
-    let db = state.db.lock().await;
-    db.execute(
-        "UPDATE devices SET bundle = ?2, last_seen_at = ?3 WHERE client_id = ?1",
-        params![auth, bundle, now() as i64],
-    )
-    .map_err(internal)?;
-    Ok(axum::Json(BundleResponse {
-        device_id: device,
-        bundle: request.bundle,
-    }))
-}
-
-async fn fetch_bundle(
-    State(state): State<AppState>,
-    Path(device): Path<String>,
-    headers: HeaderMap,
-) -> Result<axum::Json<BundleResponse>, ApiError> {
-    validate_json_accept(&headers).map_err(bad_request)?;
-    validate_text(&device, MAX_ID_BYTES, "device ID").map_err(bad_request)?;
-    authenticate_request(
-        &state,
-        &headers,
-        "GET",
-        &format!("/v1/devices/{device}/bundle"),
-        &[],
-        None,
-    )
-    .await?;
-    let db = state.db.lock().await;
-    let bundle: (String, Vec<u8>) = db
-        .query_row(
-            "SELECT client_id, bundle FROM devices WHERE client_id = ?1 OR device_address = ?1",
-            params![device],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
-    Ok(axum::Json(BundleResponse {
-        device_id: bundle.0,
-        bundle: b64(&bundle.1),
-    }))
-}
-
-async fn fetch_bundle_by_address(
-    State(state): State<AppState>,
-    Path(address): Path<String>,
-    headers: HeaderMap,
-) -> Result<axum::Json<BundleResponse>, ApiError> {
-    validate_json_accept(&headers).map_err(bad_request)?;
-    validate_text(&address, MAX_ID_BYTES, "device address").map_err(bad_request)?;
-    let path = format!("/v1/devices/by-address/{address}/bundle");
-    authenticate_request(&state, &headers, "GET", &path, &[], None).await?;
-    let db = state.db.lock().await;
-    let (device, bundle): (String, Vec<u8>) = db
-        .query_row(
-            "SELECT client_id, bundle FROM devices WHERE device_address = ?1",
-            params![address],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
-    Ok(axum::Json(BundleResponse {
-        device_id: device,
-        bundle: b64(&bundle),
     }))
 }
 
