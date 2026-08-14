@@ -11,9 +11,10 @@ use axum::{
 use rusqlite::params;
 
 use super::{
-    AppState, MessageResponse,
+    AppState,
     auth::{WsPollRequest, verify_websocket_request},
     authenticate_request, b64,
+    messages::MessageResponse,
 };
 
 pub(super) async fn route(

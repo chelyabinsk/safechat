@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use safechat_relay_protocol as relay_binary;
 
-use super::{BINARY_MEDIA_TYPE, JSON_MEDIA_TYPE, MessageResponse, b64decode};
+use super::{BINARY_MEDIA_TYPE, JSON_MEDIA_TYPE, b64decode, messages::MessageResponse};
 
 pub(super) fn media_type(headers: &HeaderMap, name: &str) -> anyhow::Result<Option<String>> {
     let Some(value) = headers.get(name) else {
@@ -135,9 +135,9 @@ pub(super) fn binary_message(message: &MessageResponse) -> anyhow::Result<relay_
 }
 
 pub(super) fn encode_binary_messages(messages: &[MessageResponse]) -> anyhow::Result<Vec<u8>> {
-    messages
+    let messages: Vec<relay_binary::Message> = messages
         .iter()
         .map(binary_message)
-        .collect::<anyhow::Result<Vec<_>>>()
-        .and_then(|messages| relay_binary::encode_messages(&messages))
+        .collect::<anyhow::Result<_>>()?;
+    relay_binary::encode_messages(&messages)
 }
