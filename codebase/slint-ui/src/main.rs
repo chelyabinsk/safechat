@@ -24,13 +24,8 @@ struct ProfileSession {
     password: String,
 }
 
-fn set_chat_messages(window: &MainWindow, messages: Vec<String>) {
-    let model = slint::VecModel::from(
-        messages
-            .into_iter()
-            .map(slint::SharedString::from)
-            .collect::<Vec<_>>(),
-    );
+fn set_chat_messages(window: &MainWindow, messages: Vec<ChatMessage>) {
+    let model = slint::VecModel::from(messages.into_iter().collect::<Vec<_>>());
     window.set_chat_messages(slint::ModelRc::new(model));
 }
 
@@ -78,7 +73,7 @@ fn open_relay_transport(
     Ok(RelayTransport::new(client, peer_ids))
 }
 
-fn render_history(history: &HistoryFile) -> Vec<String> {
+fn render_history(history: &HistoryFile) -> Vec<ChatMessage> {
     history
         .entries
         .iter()
@@ -88,12 +83,14 @@ fn render_history(history: &HistoryFile) -> Vec<String> {
             } else {
                 entry.sender.clone()
             };
-            let suffix = if entry.sender == "you" && !entry.delivery_status.is_empty() {
-                format!(" [{}]", entry.delivery_status)
-            } else {
-                String::new()
-            };
-            format!("{sender}{suffix}: {}", entry.text)
+            ChatMessage {
+                sender: sender.into(),
+                text: entry.text.clone().into(),
+                timestamp: entry.timestamp.to_string().into(),
+                outgoing: entry.sender == "you",
+                status: entry.delivery_status.clone().into(),
+                ciphertext: entry.ciphertext.clone().into(),
+            }
         })
         .collect()
 }
@@ -102,7 +99,7 @@ fn perform_paste_send(
     session: &ProfileSession,
     encoded_peer: &str,
     plaintext: &str,
-) -> Result<(Vec<String>, String, String)> {
+) -> Result<(Vec<ChatMessage>, String, String)> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
     let database = profile_database(&session.profile)?;
     let mut state =
@@ -136,7 +133,7 @@ fn perform_paste_receive(
     session: &ProfileSession,
     encoded_peer: &str,
     encoded_ciphertext: &str,
-) -> Result<(Vec<String>, String)> {
+) -> Result<(Vec<ChatMessage>, String)> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
     let database = profile_database(&session.profile)?;
     let mut state =
@@ -174,6 +171,14 @@ fn perform_paste_receive(
     ))
 }
 
+fn load_chat_history(session: &ProfileSession, encoded_peer: &str) -> Result<Vec<ChatMessage>> {
+    let peer = peer_bundle_from_encoded(encoded_peer)?;
+    let (_, _, _, lobby_root) = chat_paths(&session.profile)?;
+    let mut history_store = EncryptedHistoryStore::new(&lobby_root, &session.password)?;
+    let history = history_store.load(&peer.address().to_string())?;
+    Ok(render_history(&history))
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -184,7 +189,7 @@ fn perform_chat_action(
     session: &ProfileSession,
     encoded_peer: &str,
     plaintext: Option<&str>,
-) -> Result<(Vec<String>, String)> {
+) -> Result<(Vec<ChatMessage>, String)> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
     let database = profile_database(&session.profile)?;
     let mut state =
@@ -256,9 +261,13 @@ fn spawn_chat_action(
                 match result {
                     Ok((messages, status)) => {
                         set_chat_messages(&window, messages);
+                        window.set_chat_loading(false);
                         window.set_status_text(status.into());
                     }
-                    Err(error) => window.set_status_text(format!("Chat failed: {error:#}").into()),
+                    Err(error) => {
+                        window.set_chat_loading(false);
+                        window.set_status_text(format!("Chat failed: {error:#}").into());
+                    }
                 }
             }
         });
@@ -329,6 +338,40 @@ fn spawn_paste_receive(
                     }
                     Err(error) => {
                         window.set_status_text(format!("Paste receive failed: {error:#}").into())
+                    }
+                }
+            }
+        });
+    });
+}
+
+fn spawn_history_load(
+    window_weak: slint::Weak<MainWindow>,
+    session: Arc<Mutex<Option<ProfileSession>>>,
+    encoded_peer: String,
+) {
+    thread::spawn(move || {
+        let result = (|| {
+            let profile = session
+                .lock()
+                .map_err(|_| anyhow::anyhow!("chat session lock poisoned"))?
+                .clone()
+                .context("profile is not unlocked")?;
+            load_chat_history(&profile, &encoded_peer)
+        })();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(window) = window_weak.upgrade() {
+                match result {
+                    Ok(messages) => {
+                        set_chat_messages(&window, messages);
+                        window.set_chat_loading(false);
+                        window.set_status_text("Chat history loaded.".into());
+                    }
+                    Err(error) => {
+                        window.set_chat_loading(false);
+                        window.set_status_text(
+                            format!("Could not load chat history: {error:#}").into(),
+                        );
                     }
                 }
             }
@@ -592,11 +635,21 @@ fn main() -> Result<(), slint::PlatformError> {
     let session_for_send = Arc::clone(&session);
     window.on_select_contact(move || {
         if let Some(window) = window_weak.upgrade() {
+            if window.get_chat_loading() {
+                return;
+            }
             window.set_conversation_selected(true);
+            window.set_chat_loading(true);
             window.set_status_text("Conversation selected.".into());
             let peer = window.get_contact_bundle().to_string();
             if !peer.is_empty() {
-                spawn_chat_action(window.as_weak(), Arc::clone(&session_for_send), peer, None);
+                if window.get_selected_transport() == "Relay" {
+                    spawn_chat_action(window.as_weak(), Arc::clone(&session_for_send), peer, None);
+                } else {
+                    spawn_history_load(window.as_weak(), Arc::clone(&session_for_send), peer);
+                }
+            } else {
+                window.set_chat_loading(false);
             }
         }
     });
@@ -657,6 +710,25 @@ fn main() -> Result<(), slint::PlatformError> {
                     ciphertext.to_string(),
                 );
             }
+        }
+    });
+
+    let window_weak = window.as_weak();
+    window.on_copy_ciphertext(move |ciphertext| {
+        if let Some(window) = window_weak.upgrade() {
+            let ciphertext = ciphertext.to_string();
+            let status = if ciphertext.is_empty() {
+                "Ciphertext is unavailable for this message.".to_owned()
+            } else {
+                match Clipboard::new() {
+                    Ok(mut clipboard) => clipboard
+                        .set_text(ciphertext)
+                        .map(|_| "Ciphertext copied to clipboard.".to_owned())
+                        .unwrap_or_else(|error| format!("Could not copy ciphertext: {error}")),
+                    Err(error) => format!("Could not access clipboard: {error}"),
+                }
+            };
+            window.set_status_text(status.into());
         }
     });
 

@@ -1,5 +1,14 @@
 import { Button, ComboBox, GroupBox, HorizontalBox, LineEdit, VerticalBox } from "std-widgets.slint";
 
+export struct ChatMessage {
+    sender: string,
+    text: string,
+    timestamp: string,
+    outgoing: bool,
+    status: string,
+    ciphertext: string,
+}
+
 export component MainWindow inherits Window {
     title: "SafeChat";
     preferred-width: 980px;
@@ -15,7 +24,8 @@ export component MainWindow inherits Window {
     in-out property <string> contact-bundle: "";
     in-out property <bool> contact-added: false;
     in-out property <bool> conversation-selected: false;
-    in-out property <[string]> chat-messages: [];
+    in-out property <bool> chat-loading: false;
+    in-out property <[ChatMessage]> chat-messages: [];
     in-out property <string> selected-transport: "Copy/paste";
     in-out property <[string]> transport-options: [];
     in-out property <bool> profile-ready: false;
@@ -34,6 +44,7 @@ export component MainWindow inherits Window {
     callback verify-add-contact(string, string, string);
     callback select-contact();
     callback receive-pasted(string);
+    callback copy-ciphertext(string);
 
     Rectangle {
         background: #f7f8fa;
@@ -49,7 +60,7 @@ export component MainWindow inherits Window {
                     padding-right: 22px;
                     Text { text: "SafeChat"; color: white; font-size: 24px; }
                     Text { text: "  " + root.profile-name; color: #d7f5ef; horizontal-stretch: 1; }
-                    if root.conversation-selected: ComboBox {
+                    if root.conversation-selected && !root.chat-loading: ComboBox {
                         model: root.transport-options;
                         selected(value) => { root.selected-transport = value; root.choose-transport(value); }
                     }
@@ -75,6 +86,7 @@ export component MainWindow inherits Window {
                         }
                         if root.contact-added: TouchArea {
                             height: 70px;
+                            enabled: !root.chat-loading;
                             clicked => { root.select-contact(); }
                             Rectangle {
                                 background: #e8f5f2;
@@ -96,20 +108,50 @@ export component MainWindow inherits Window {
                     VerticalBox {
                         padding: 24px;
                         spacing: 12px;
-                        if root.contact-added && root.conversation-selected && !root.new-chat-open: Text {
+                        if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.chat-loading: Text {
                             text: "Conversation with " + root.contact-name;
                             font-size: 24px;
                             color: #41525d;
                             horizontal-alignment: center;
-                            vertical-stretch: 1;
                         }
-                        if root.contact-added && root.conversation-selected && !root.new-chat-open: VerticalBox {
-                            for message in root.chat-messages: Text {
-                                text: message;
-                                color: #1f2933;
-                                wrap: word-wrap;
-                            }
+                        if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.chat-loading: Flickable {
                             vertical-stretch: 1;
+                            VerticalBox {
+                                width: parent.width;
+                                for message in root.chat-messages: HorizontalBox {
+                                    Rectangle { horizontal-stretch: message.outgoing ? 1 : 0; }
+                                    message_area := TouchArea {
+                                        width: 360px;
+                                        height: message_bubble.height;
+                                        clicked => { root.copy-ciphertext(message.ciphertext); }
+                                        message_bubble := Rectangle {
+                                            width: parent.width;
+                                            height: max(72px, message_content.preferred-height);
+                                            background: message.outgoing ? #d9fdd3 : white;
+                                            border-radius: 10px;
+                                            message_content := VerticalBox {
+                                                width: parent.width;
+                                                padding: 10px;
+                                                spacing: 3px;
+                                                Text { text: message.sender; color: #667781; font-size: 12px; }
+                                                Text { text: message.text; width: parent.width - 20px; color: #1f2933; wrap: word-wrap; }
+                                                HorizontalBox {
+                                                    Text { text: message.timestamp; color: #8696a0; font-size: 10px; horizontal-stretch: 1; }
+                                                    if message.outgoing: Text { text: message.status; color: #667781; font-size: 10px; }
+                                                }
+                                            }
+                                            if message.outgoing && message_area.has-hover: Text {
+                                                text: "Copy ciphertext";
+                                                color: #075e54;
+                                                x: parent.width - self.width - 8px;
+                                                y: 4px;
+                                                font-size: 10px;
+                                            }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: message.outgoing ? 0 : 1; }
+                                }
+                            }
                         }
                         if root.new-chat-open: GroupBox {
                             title: "New conversation";
@@ -140,8 +182,14 @@ export component MainWindow inherits Window {
                             horizontal-alignment: center;
                             vertical-stretch: 1;
                         }
-                        Text { text: root.status-text; color: #667781; horizontal-alignment: center; }
-                        if root.conversation-selected: HorizontalBox {
+                        if !root.chat-loading: Text { text: root.status-text; color: #667781; horizontal-alignment: center; }
+                        if root.conversation-selected && root.chat-loading: Text {
+                            text: "Decrypting chat history…";
+                            color: #667781;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+                        if root.conversation-selected && !root.chat-loading: HorizontalBox {
                             spacing: 8px;
                             message_input := LineEdit {
                                 placeholder-text: "Type a message";
@@ -150,7 +198,7 @@ export component MainWindow inherits Window {
                             }
                             Button { text: "Send"; enabled: root.profile-ready; clicked => { root.send-message(message_input.text); message_input.text = ""; } }
                         }
-                        if root.conversation-selected && root.selected-transport == "Copy/paste": HorizontalBox {
+                        if root.conversation-selected && !root.chat-loading && root.selected-transport == "Copy/paste": HorizontalBox {
                             paste_input := LineEdit {
                                 placeholder-text: "Paste encrypted message here";
                                 horizontal-stretch: 1;
