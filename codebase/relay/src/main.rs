@@ -1,7 +1,7 @@
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, StatusCode},
+    extract::DefaultBodyLimit,
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -10,7 +10,6 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
 use rusqlite::{Connection, params};
 use safechat_relay_protocol as relay_binary;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,7 +18,6 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 
 const API_VERSION: &str = "safechat-relay-v1";
@@ -37,6 +35,7 @@ const MAX_IDENTITY_B64_BYTES: usize = 256;
 const MAX_SIGNATURE_B64_BYTES: usize = 512;
 const MAX_BUNDLE_BYTES: usize = 1024 * 1024;
 
+mod admin;
 mod auth;
 mod bundles;
 mod contacts;
@@ -45,6 +44,7 @@ mod enrollment;
 mod events;
 mod messages;
 mod validation;
+use admin::{AdminAllowlistRequest, allowlist as admin_allowlist};
 use auth::*;
 use bundles::{
     fetch as fetch_bundle, fetch_by_address as fetch_bundle_by_address, publish as publish_bundle,
@@ -163,16 +163,6 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         (self.0, axum::Json(json!({"error": self.1}))).into_response()
     }
-}
-
-#[derive(Deserialize, Serialize)]
-struct AdminAllowlistRequest {
-    client_id: String,
-    identity_key: String,
-    fingerprint: String,
-    enrollment_secret: String,
-    #[serde(default)]
-    label: String,
 }
 
 #[tokio::main]
@@ -404,55 +394,6 @@ fn router(state: AppState) -> Router {
         .route("/v1/events", get(events_route))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
-}
-
-async fn admin_allowlist(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    axum::Json(request): axum::Json<AdminAllowlistRequest>,
-) -> Result<axum::Json<serde_json::Value>, ApiError> {
-    require_json_content(&headers).map_err(bad_request)?;
-    validate_json_accept(&headers).map_err(bad_request)?;
-    validate_text(&request.client_id, MAX_ID_BYTES, "client ID").map_err(bad_request)?;
-    validate_text(&request.fingerprint, MAX_FINGERPRINT_BYTES, "fingerprint")
-        .map_err(bad_request)?;
-    validate_text(
-        &request.enrollment_secret,
-        MAX_SECRET_BYTES,
-        "enrollment secret",
-    )
-    .map_err(bad_request)?;
-    validate_text(&request.label, MAX_LABEL_BYTES, "label").map_err(bad_request)?;
-    decode_bounded_base64(
-        &request.identity_key,
-        MAX_IDENTITY_B64_BYTES,
-        128,
-        "identity key",
-    )
-    .map_err(bad_request)?;
-    let Some(expected) = state.admin_token.as_deref() else {
-        return Err(not_found());
-    };
-    let Some(provided) = bearer(&headers) else {
-        return Err(unauthorized());
-    };
-    if provided.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
-        return Err(unauthorized());
-    }
-    let db = state.db.lock().await;
-    add_allowlist(
-        &db,
-        &request.client_id,
-        &request.identity_key,
-        &request.fingerprint,
-        &request.enrollment_secret,
-        &request.label,
-    )
-    .map_err(internal)?;
-    Ok(axum::Json(json!({
-        "allowlisted": true,
-        "client_id": request.client_id,
-    })))
 }
 
 async fn health() -> impl IntoResponse {
