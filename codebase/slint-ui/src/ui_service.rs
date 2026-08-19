@@ -9,13 +9,18 @@ use anyhow::{Context, Result};
 mod chat;
 mod contracts;
 mod model;
+mod ports;
 mod profile;
+mod state;
 mod worker;
-use chat::{load_chat_history, perform_chat_action, perform_paste_receive, perform_paste_send};
+use chat::{
+    load_chat_history, load_older_chat_history, perform_chat_action, perform_paste_receive,
+    perform_paste_send,
+};
 pub use contracts::{Command, Event, Operation};
 pub use model::{ConversationMessage, TransportKind};
-pub use profile::available_profiles;
-use profile::{initialize_profile, load_saved_contact, verify_add_contact};
+pub use ports::ServicePorts;
+pub use state::UiState;
 pub use worker::UiService;
 
 #[derive(Clone, Debug)]
@@ -27,11 +32,12 @@ pub struct ProfileSession {
 pub(super) fn handle_command(
     session: &mut Option<ProfileSession>,
     command: Command,
+    ports: &ports::ServicePorts,
 ) -> std::result::Result<Option<Event>, contracts::ServiceError> {
     let operation = match &command {
         Command::Initialize { .. } => Operation::Profile,
         Command::VerifyContact { .. } => Operation::Contact,
-        Command::LoadHistory { .. } => Operation::History,
+        Command::LoadHistory { .. } | Command::LoadOlderHistory { .. } => Operation::History,
         Command::Send { transport, .. } => {
             if matches!(transport, TransportKind::Relay) {
                 Operation::Relay
@@ -47,40 +53,60 @@ pub(super) fn handle_command(
             profile,
             password,
             confirmation,
-        } => initialize_profile(&profile, &password, &confirmation).map(|(fingerprint, bundle)| {
-            *session = Some(ProfileSession {
-                profile: profile.clone(),
-                password,
-            });
-            let contact = load_saved_contact(&profile).ok().flatten();
-            Some(Event::ProfileReady {
-                profile,
-                fingerprint,
-                bundle,
-                contact,
-            })
-        }),
+        } => ports
+            .profile
+            .initialize(&profile, &password, &confirmation)
+            .map(|ready| {
+                *session = Some(ProfileSession {
+                    profile: ready.profile.clone(),
+                    password,
+                });
+                Some(Event::ProfileReady {
+                    profile: ready.profile,
+                    fingerprint: ready.fingerprint,
+                    bundle: ready.bundle,
+                    contact: ready.contact,
+                })
+            }),
         Command::VerifyContact {
             profile,
             password,
             bundle,
             fingerprint,
-        } => {
-            verify_add_contact(&profile, &password, &bundle, &fingerprint).map(|(name, status)| {
+        } => ports
+            .profile
+            .verify_contact(&profile, &password, &bundle, &fingerprint)
+            .map(|(name, status)| {
                 Some(Event::ContactAdded {
                     name,
                     bundle,
                     status,
                 })
-            })
-        }
+            }),
         Command::LoadHistory { peer } => require_session(session)
-            .and_then(|active| load_chat_history(active, &peer))
-            .map(|messages| {
+            .and_then(|active| load_chat_history(active, &peer, ports.history.as_ref()))
+            .map(|page| {
                 Some(Event::ChatUpdated {
-                    messages,
+                    messages: page.messages,
                     status: "Chat history loaded.".to_owned(),
                     ciphertext: None,
+                    history_cursor: page.cursor,
+                    has_more: page.has_more,
+                    prepend: false,
+                })
+            }),
+        Command::LoadOlderHistory { peer, before } => require_session(session)
+            .and_then(|active| {
+                load_older_chat_history(active, &peer, before, ports.history.as_ref())
+            })
+            .map(|page| {
+                Some(Event::ChatUpdated {
+                    messages: page.messages,
+                    status: "Older messages loaded.".to_owned(),
+                    ciphertext: None,
+                    history_cursor: page.cursor,
+                    has_more: page.has_more,
+                    prepend: true,
                 })
             }),
         Command::Send {
@@ -89,39 +115,66 @@ pub(super) fn handle_command(
             text,
         } => require_session(session).and_then(|active| {
             if transport == TransportKind::CopyPaste {
-                perform_paste_send(active, &peer, &text).map(|(messages, status, ciphertext)| {
+                perform_paste_send(
+                    active,
+                    &peer,
+                    &text,
+                    ports.history.as_ref(),
+                    ports.clock.as_ref(),
+                )
+                .map(|(page, status, ciphertext)| {
                     Some(Event::ChatUpdated {
-                        messages,
+                        messages: page.messages,
                         status,
                         ciphertext: Some(ciphertext),
+                        history_cursor: page.cursor,
+                        has_more: page.has_more,
+                        prepend: false,
                     })
                 })
             } else {
-                perform_chat_action(active, &peer, Some(&text)).map(|(messages, status)| {
+                perform_chat_action(active, &peer, Some(&text)).map(|(page, status)| {
                     Some(Event::ChatUpdated {
-                        messages,
+                        messages: page.messages,
                         status,
                         ciphertext: None,
+                        history_cursor: page.cursor,
+                        has_more: page.has_more,
+                        prepend: false,
                     })
                 })
             }
         }),
         Command::ReceivePasted { peer, ciphertext } => require_session(session)
-            .and_then(|active| perform_paste_receive(active, &peer, &ciphertext))
-            .map(|(messages, status)| {
+            .and_then(|active| {
+                perform_paste_receive(
+                    active,
+                    &peer,
+                    &ciphertext,
+                    ports.history.as_ref(),
+                    ports.clock.as_ref(),
+                )
+            })
+            .map(|(page, status)| {
                 Some(Event::ChatUpdated {
-                    messages,
+                    messages: page.messages,
                     status,
                     ciphertext: None,
+                    history_cursor: page.cursor,
+                    has_more: page.has_more,
+                    prepend: false,
                 })
             }),
         Command::Poll { peer } => require_session(session)
             .and_then(|active| perform_chat_action(active, &peer, None))
-            .map(|(messages, status)| {
+            .map(|(page, status)| {
                 Some(Event::ChatUpdated {
-                    messages,
+                    messages: page.messages,
                     status,
                     ciphertext: None,
+                    history_cursor: page.cursor,
+                    has_more: page.has_more,
+                    prepend: false,
                 })
             }),
     };

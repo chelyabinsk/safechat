@@ -2,6 +2,8 @@ app-id: io.safechat.SafeChat
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: safechat-slint-ui
 
 finish-args:
@@ -14,7 +16,9 @@ modules:
   - name: safechat
     buildsystem: simple
     build-options:
-      network: true
+      build-args:
+        - --share=network
+      append-path: /usr/lib/sdk/rust-stable/bin
     build-commands:
       - cargo build --release --locked --manifest-path codebase/Cargo.toml -p safechat-slint-ui
       - install -Dm755 codebase/target/release/safechat-slint-ui /app/bin/safechat-slint-ui
@@ -22,3 +26,9 @@ modules:
     sources:
       - type: dir
         path: ../..
+        skip:
+          - .flatpak-builder
+          - codebase/target
+          - packaging/flatpak/build
+          - packaging/flatpak/repo
+          - relay-tls

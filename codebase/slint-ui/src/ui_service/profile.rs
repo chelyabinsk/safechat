@@ -7,6 +7,41 @@ use safechat_core::signal_adapter::{SignalPreKeyBundle, SqliteSignalState};
 use safechat_core::transport::BundleTransport;
 use std::path::PathBuf;
 
+use super::ports::{ProfileReadyData, ProfileStore};
+
+pub(super) struct FileProfileStore;
+
+impl ProfileStore for FileProfileStore {
+    fn available_profiles(&self) -> Result<Vec<String>> {
+        available_profiles()
+    }
+
+    fn initialize(
+        &self,
+        profile: &str,
+        password: &str,
+        confirmation: &str,
+    ) -> Result<ProfileReadyData> {
+        let (fingerprint, bundle) = initialize_profile(profile, password, confirmation)?;
+        Ok(ProfileReadyData {
+            profile: profile.trim().to_owned(),
+            fingerprint,
+            bundle,
+            contact: load_saved_contact(profile).ok().flatten(),
+        })
+    }
+
+    fn verify_contact(
+        &self,
+        profile: &str,
+        password: &str,
+        bundle: &str,
+        fingerprint: &str,
+    ) -> Result<(String, String)> {
+        verify_add_contact(profile, password, bundle, fingerprint)
+    }
+}
+
 pub fn available_profiles() -> Result<Vec<String>> {
     let root = profile_root()?;
     if !root.exists() {
@@ -32,6 +67,13 @@ pub(super) fn profile_root() -> Result<PathBuf> {
 }
 
 pub(super) fn profile_database(profile: &str) -> Result<PathBuf> {
+    let profile = validate_profile_name(profile)?;
+    let root = profile_root()?.join(profile);
+    std::fs::create_dir_all(&root).context("creating the SafeChat profile directory")?;
+    Ok(root.join("identity.db"))
+}
+
+pub(super) fn validate_profile_name(profile: &str) -> Result<&str> {
     let profile = profile.trim();
     if profile.is_empty()
         || profile == "."
@@ -41,9 +83,7 @@ pub(super) fn profile_database(profile: &str) -> Result<PathBuf> {
     {
         bail!("profile name must be a simple non-empty name");
     }
-    let root = profile_root()?.join(profile);
-    std::fs::create_dir_all(&root).context("creating the SafeChat profile directory")?;
-    Ok(root.join("identity.db"))
+    Ok(profile)
 }
 
 pub(super) fn initialize_profile(
@@ -144,4 +184,21 @@ pub(super) fn verify_add_contact(
         bundle.name.clone(),
         format!("Verified and added {}.", bundle.name),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_profile_name;
+
+    #[test]
+    fn profile_names_are_trimmed_without_becoming_paths() {
+        assert_eq!(validate_profile_name("  alice  ").unwrap(), "alice");
+    }
+
+    #[test]
+    fn profile_names_reject_empty_and_path_like_values() {
+        for value in ["", "   ", ".", "..", "alice/bob", r"alice\bob"] {
+            assert!(validate_profile_name(value).is_err(), "accepted {value:?}");
+        }
+    }
 }

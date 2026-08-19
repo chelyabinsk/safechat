@@ -2,18 +2,13 @@ slint::include_modules!();
 
 mod ui_service;
 
-use arboard::Clipboard;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use ui_service::{
-    Command, ConversationMessage, Event, TransportKind, UiService, available_profiles,
-};
+use ui_service::{Command, Event, UiService, UiState};
 
-fn set_chat_messages(window: &MainWindow, messages: Vec<ChatMessage>) {
-    window.set_chat_messages(slint::ModelRc::new(slint::VecModel::from(messages)));
-}
-
-fn to_slint_message(message: ConversationMessage) -> ChatMessage {
+fn to_slint_message(message: ui_service::ConversationMessage) -> ChatMessage {
     ChatMessage {
         sender: message.sender.into(),
         text: message.text.into(),
@@ -24,285 +19,352 @@ fn to_slint_message(message: ConversationMessage) -> ChatMessage {
     }
 }
 
-fn set_status(window: &MainWindow, message: impl Into<slint::SharedString>) {
-    window.set_status_text(message.into());
+fn render_state(window: &MainWindow, state: &UiState, transport_options: &[String]) {
+    window.set_status_text(state.status.clone().into());
+    window.set_available_profiles(slint::ModelRc::new(slint::VecModel::from(
+        state
+            .profiles
+            .iter()
+            .cloned()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>(),
+    )));
+    window.set_transport_options(slint::ModelRc::new(slint::VecModel::from(
+        transport_options
+            .iter()
+            .cloned()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>(),
+    )));
+    window.set_profile_name(state.profile_name.clone().into());
+    window.set_selected_profile(state.selected_profile.clone().into());
+    window.set_profile_exists(state.profile_exists);
+    window.set_creating_profile(state.creating_profile);
+    window.set_profile_ready(state.profile_ready);
+    window.set_fingerprint(state.fingerprint.clone().into());
+    window.set_public_bundle(state.public_bundle.clone().into());
+    window.set_contact_name(state.contact_name.clone().into());
+    window.set_contact_bundle(state.contact_bundle.clone().into());
+    window.set_contact_added(state.contact_added);
+    window.set_conversation_selected(state.conversation_selected);
+    window.set_chat_loading(state.chat_loading);
+    window.set_new_chat_open(state.new_chat_open);
+    window.set_profile_info_open(state.profile_info_open);
+    window.set_history_has_more(state.history_has_more);
+    window.set_scroll_generation(state.scroll_generation);
+    window.set_selected_transport(state.selected_transport.to_string().into());
+    window.set_chat_messages(slint::ModelRc::new(slint::VecModel::from(
+        state
+            .messages
+            .clone()
+            .into_iter()
+            .map(to_slint_message)
+            .collect::<Vec<_>>(),
+    )));
 }
 
-fn copy_to_clipboard(text: String, success: &str) -> String {
-    match Clipboard::new() {
-        Ok(mut clipboard) => clipboard
-            .set_text(text)
-            .map(|_| success.to_owned())
-            .unwrap_or_else(|error| format!("Could not copy to clipboard: {error}")),
-        Err(error) => format!("Could not access clipboard: {error}"),
-    }
-}
-
-fn apply_event(window: &MainWindow, event: Event) {
-    match event {
-        Event::ProfileReady {
-            profile,
-            fingerprint,
-            bundle,
-            contact,
-        } => {
-            window.set_profile_name(profile.clone().into());
-            window.set_selected_profile(profile.into());
-            window.set_profile_ready(true);
-            window.set_fingerprint(fingerprint.into());
-            window.set_public_bundle(bundle.into());
-            if let Some((name, bundle)) = contact {
-                window.set_contact_name(name.into());
-                window.set_contact_bundle(bundle.into());
-                window.set_contact_added(true);
-            }
-            set_status(
-                window,
-                "Profile ready. Verify fingerprints through a separate trusted channel.",
-            );
-        }
-        Event::ContactAdded {
-            name,
-            bundle,
-            status,
-        } => {
-            window.set_contact_name(name.into());
-            window.set_contact_bundle(bundle.into());
-            window.set_contact_added(true);
-            window.set_conversation_selected(false);
-            window.set_chat_loading(false);
-            window.set_new_chat_open(false);
-            set_status(window, status);
-        }
+fn apply_event(
+    window: &MainWindow,
+    state: &Rc<RefCell<UiState>>,
+    service: &UiService,
+    event: Event,
+    transport_options: &[String],
+) {
+    let copy_request = match &event {
         Event::ChatUpdated {
-            messages,
-            status,
-            ciphertext,
-        } => {
-            set_chat_messages(window, messages.into_iter().map(to_slint_message).collect());
-            window.set_chat_loading(false);
-            if let Some(ciphertext) = ciphertext {
-                set_status(
-                    window,
-                    copy_to_clipboard(
-                        ciphertext,
-                        "Encrypted message copied. Paste it into the recipient’s chat.",
-                    ),
-                );
-            } else {
-                set_status(window, status);
-            }
-        }
-        Event::Error { operation, message } => {
-            window.set_chat_loading(false);
-            set_status(window, format!("{operation} failed: {message}"));
-        }
+            ciphertext: Some(ciphertext),
+            ..
+        } => Some(ciphertext.clone()),
+        _ => None,
+    };
+    state.borrow_mut().apply(&event);
+    render_state(window, &state.borrow(), transport_options);
+    if let Some(text) = copy_request {
+        state.borrow_mut().status = match service.copy_text(&text) {
+            Ok(()) => "Encrypted message copied. Paste it into the recipient’s chat.".to_owned(),
+            Err(error) => format!("Could not copy to clipboard: {error}"),
+        };
+        render_state(window, &state.borrow(), transport_options);
     }
 }
 
 fn main() -> Result<(), slint::PlatformError> {
     let window = MainWindow::new()?;
     let service = Arc::new(UiService::new());
-    let profiles =
-        available_profiles().map_err(|error| slint::PlatformError::Other(error.to_string()))?;
-    window.set_available_profiles(slint::ModelRc::new(slint::VecModel::from(
-        profiles
-            .iter()
-            .cloned()
-            .map(slint::SharedString::from)
-            .collect::<Vec<_>>(),
-    )));
-    window.set_transport_options(slint::ModelRc::new(slint::VecModel::from(vec![
-        "Copy/paste".into(),
-        "Relay".into(),
-    ])));
-    if let Some(profile) = profiles.first() {
-        window.set_profile_name(profile.clone().into());
-        window.set_selected_profile(profile.clone().into());
-        window.set_profile_exists(true);
-    } else {
-        window.set_creating_profile(true);
-    }
+    let profiles = service
+        .available_profiles()
+        .map_err(|error| slint::PlatformError::Other(error.to_string()))?;
+    let transport_options = service.transport_options();
+    let state = Rc::new(RefCell::new(UiState::from_profiles(profiles)));
+    render_state(&window, &state.borrow(), &transport_options);
 
     let window_weak = window.as_weak();
     let service_for_initialize = Arc::clone(&service);
+    let state_for_initialize = Rc::clone(&state);
+    let options_for_initialize = transport_options.clone();
     window.on_initialize_profile(move |profile, password, confirmation| {
         let command = Command::Initialize {
             profile: profile.to_string(),
             password: password.to_string(),
             confirmation: confirmation.to_string(),
         };
+        state_for_initialize.borrow_mut().prepare(&command);
         if let Some(window) = window_weak.upgrade() {
-            set_status(&window, "Unlocking encrypted profile…");
+            render_state(
+                &window,
+                &state_for_initialize.borrow(),
+                &options_for_initialize,
+            );
             if let Err(error) = service_for_initialize.submit(command) {
-                set_status(&window, format!("Setup failed: {error}"));
+                state_for_initialize.borrow_mut().status = format!("Setup failed: {error}");
+                render_state(
+                    &window,
+                    &state_for_initialize.borrow(),
+                    &options_for_initialize,
+                );
             }
         }
     });
 
     let window_weak = window.as_weak();
+    let state_for_select_profile = Rc::clone(&state);
+    let options_for_select_profile = transport_options.clone();
     window.on_select_profile(move |profile| {
+        let mut state = state_for_select_profile.borrow_mut();
+        state.profile_name = profile.to_string();
+        state.selected_profile = profile.to_string();
+        state.profile_exists = true;
+        state.status = format!("Selected profile: {profile}");
         if let Some(window) = window_weak.upgrade() {
-            window.set_profile_name(profile.clone());
-            window.set_selected_profile(profile.clone());
-            window.set_profile_exists(true);
-            set_status(&window, format!("Selected profile: {profile}"));
+            render_state(&window, &state, &options_for_select_profile);
         }
     });
 
     let window_weak = window.as_weak();
+    let state_for_create = Rc::clone(&state);
+    let options_for_create = transport_options.clone();
     window.on_begin_create_profile(move || {
+        let mut state = state_for_create.borrow_mut();
+        state.creating_profile = !state.creating_profile;
         if let Some(window) = window_weak.upgrade() {
-            window.set_creating_profile(!window.get_creating_profile());
+            render_state(&window, &state, &options_for_create);
         }
     });
 
     let window_weak = window.as_weak();
     let service_for_contact = Arc::clone(&service);
+    let state_for_contact = Rc::clone(&state);
+    let options_for_contact = transport_options.clone();
     window.on_verify_add_contact(move |bundle, fingerprint, password| {
+        let command = Command::VerifyContact {
+            profile: state_for_contact.borrow().profile_name.clone(),
+            password: password.to_string(),
+            bundle: bundle.to_string(),
+            fingerprint: fingerprint.to_string(),
+        };
+        state_for_contact.borrow_mut().prepare(&command);
         if let Some(window) = window_weak.upgrade() {
-            set_status(&window, "Verifying contact…");
-            let command = Command::VerifyContact {
-                profile: window.get_profile_name().to_string(),
-                password: password.to_string(),
-                bundle: bundle.to_string(),
-                fingerprint: fingerprint.to_string(),
-            };
+            render_state(&window, &state_for_contact.borrow(), &options_for_contact);
             if let Err(error) = service_for_contact.submit(command) {
-                set_status(&window, format!("Contact verification failed: {error}"));
+                state_for_contact.borrow_mut().status =
+                    format!("Contact verification failed: {error}");
+                render_state(&window, &state_for_contact.borrow(), &options_for_contact);
             }
         }
     });
 
     let window_weak = window.as_weak();
     let service_for_select = Arc::clone(&service);
+    let state_for_select = Rc::clone(&state);
+    let options_for_select = transport_options.clone();
     window.on_select_contact(move || {
-        if let Some(window) = window_weak.upgrade() {
-            if window.get_chat_loading() {
-                return;
-            }
-            let peer = window.get_contact_bundle().to_string();
-            if peer.is_empty() {
-                return;
-            }
-            window.set_conversation_selected(true);
-            window.set_chat_loading(true);
-            set_status(&window, "Conversation selected.");
-            let command = if window.get_selected_transport() == "Relay" {
+        let peer = state_for_select.borrow().contact_bundle.clone();
+        if peer.is_empty() || state_for_select.borrow().chat_loading {
+            return;
+        }
+        let command =
+            if state_for_select.borrow().selected_transport == ui_service::TransportKind::Relay {
                 Command::Poll { peer }
             } else {
                 Command::LoadHistory { peer }
             };
+        {
+            let mut state = state_for_select.borrow_mut();
+            state.conversation_selected = true;
+            state.prepare(&command);
+        }
+        if let Some(window) = window_weak.upgrade() {
+            render_state(&window, &state_for_select.borrow(), &options_for_select);
             if let Err(error) = service_for_select.submit(command) {
-                window.set_chat_loading(false);
-                set_status(&window, format!("Could not open chat: {error}"));
+                state_for_select.borrow_mut().status = format!("Could not open chat: {error}");
+                state_for_select.borrow_mut().chat_loading = false;
+                render_state(&window, &state_for_select.borrow(), &options_for_select);
             }
         }
     });
 
     let window_weak = window.as_weak();
-    window.on_choose_transport(move |transport| {
+    let service_for_older = Arc::clone(&service);
+    let state_for_older = Rc::clone(&state);
+    let options_for_older = transport_options.clone();
+    window.on_load_older_history(move || {
+        let snapshot = state_for_older.borrow().clone();
+        if snapshot.chat_loading || !snapshot.history_has_more || snapshot.contact_bundle.is_empty()
+        {
+            return;
+        }
+        let command = Command::LoadOlderHistory {
+            peer: snapshot.contact_bundle,
+            before: snapshot.history_cursor,
+        };
+        state_for_older.borrow_mut().prepare(&command);
         if let Some(window) = window_weak.upgrade() {
-            set_status(&window, format!("Selected transport: {transport}"));
+            render_state(&window, &state_for_older.borrow(), &options_for_older);
+            if let Err(error) = service_for_older.submit(command) {
+                state_for_older.borrow_mut().status =
+                    format!("Could not load older messages: {error}");
+                state_for_older.borrow_mut().chat_loading = false;
+                render_state(&window, &state_for_older.borrow(), &options_for_older);
+            }
+        }
+    });
+
+    let window_weak = window.as_weak();
+    let service_for_transport = Arc::clone(&service);
+    let state_for_transport = Rc::clone(&state);
+    let options_for_transport = transport_options.clone();
+    window.on_choose_transport(move |transport| {
+        if let Some(transport) = service_for_transport.parse_transport(transport.as_str()) {
+            state_for_transport.borrow_mut().select_transport(transport);
+            if let Some(window) = window_weak.upgrade() {
+                render_state(
+                    &window,
+                    &state_for_transport.borrow(),
+                    &options_for_transport,
+                );
+            }
         }
     });
 
     let window_weak = window.as_weak();
     let service_for_send = Arc::clone(&service);
+    let state_for_send = Rc::clone(&state);
+    let options_for_send = transport_options.clone();
     window.on_send_message(move |message| {
-        if let Some(window) = window_weak.upgrade() {
-            let peer = window.get_contact_bundle().to_string();
-            if peer.is_empty() {
-                set_status(&window, "Add and select a contact first.");
-            } else if message.trim().is_empty() {
-                set_status(&window, "Type a message first.");
-            } else {
-                set_status(&window, "Encrypting and sending…");
-                let Some(transport) = TransportKind::parse(&window.get_selected_transport()) else {
-                    set_status(&window, "Unsupported transport selected.");
-                    return;
-                };
-                let command = Command::Send {
-                    peer,
-                    transport,
-                    text: message.to_string(),
-                };
-                if let Err(error) = service_for_send.submit(command) {
-                    set_status(&window, format!("Could not send message: {error}"));
-                }
+        let state_snapshot = state_for_send.borrow().clone();
+        if state_snapshot.contact_bundle.is_empty() {
+            state_for_send.borrow_mut().status = "Add and select a contact first.".to_owned();
+        } else if message.trim().is_empty() {
+            state_for_send.borrow_mut().status = "Type a message first.".to_owned();
+        } else {
+            let command = Command::Send {
+                peer: state_snapshot.contact_bundle,
+                transport: state_snapshot.selected_transport,
+                text: message.to_string(),
+            };
+            state_for_send.borrow_mut().prepare(&command);
+            if let Err(error) = service_for_send.submit(command) {
+                state_for_send.borrow_mut().status = format!("Could not send message: {error}");
+                state_for_send.borrow_mut().chat_loading = false;
             }
+        }
+        if let Some(window) = window_weak.upgrade() {
+            render_state(&window, &state_for_send.borrow(), &options_for_send);
         }
     });
 
     let window_weak = window.as_weak();
     let service_for_receive = Arc::clone(&service);
+    let state_for_receive = Rc::clone(&state);
+    let options_for_receive = transport_options.clone();
     window.on_receive_pasted(move |ciphertext| {
-        if let Some(window) = window_weak.upgrade() {
-            let peer = window.get_contact_bundle().to_string();
-            if peer.is_empty() {
-                set_status(&window, "Add and select a contact first.");
-            } else if ciphertext.trim().is_empty() {
-                set_status(&window, "Paste an encrypted message first.");
-            } else {
-                set_status(&window, "Decrypting pasted message…");
-                let command = Command::ReceivePasted {
-                    peer,
-                    ciphertext: ciphertext.to_string(),
-                };
-                if let Err(error) = service_for_receive.submit(command) {
-                    set_status(&window, format!("Could not receive message: {error}"));
-                }
+        let state_snapshot = state_for_receive.borrow().clone();
+        if state_snapshot.contact_bundle.is_empty() {
+            state_for_receive.borrow_mut().status = "Add and select a contact first.".to_owned();
+        } else if ciphertext.trim().is_empty() {
+            state_for_receive.borrow_mut().status = "Paste an encrypted message first.".to_owned();
+        } else {
+            let command = Command::ReceivePasted {
+                peer: state_snapshot.contact_bundle,
+                ciphertext: ciphertext.to_string(),
+            };
+            state_for_receive.borrow_mut().prepare(&command);
+            if let Err(error) = service_for_receive.submit(command) {
+                state_for_receive.borrow_mut().status =
+                    format!("Could not receive message: {error}");
+                state_for_receive.borrow_mut().chat_loading = false;
             }
         }
-    });
-
-    let window_weak = window.as_weak();
-    window.on_copy_ciphertext(move |ciphertext| {
         if let Some(window) = window_weak.upgrade() {
-            set_status(
-                &window,
-                copy_to_clipboard(ciphertext.to_string(), "Ciphertext copied to clipboard."),
-            );
+            render_state(&window, &state_for_receive.borrow(), &options_for_receive);
         }
     });
 
     let window_weak = window.as_weak();
+    let service_for_copy = Arc::clone(&service);
+    let state_for_copy = Rc::clone(&state);
+    let options_for_copy = transport_options.clone();
+    window.on_copy_ciphertext(move |text| {
+        state_for_copy.borrow_mut().status = match service_for_copy.copy_text(text.as_str()) {
+            Ok(()) => "Ciphertext copied to clipboard.".to_owned(),
+            Err(error) => format!("Could not copy to clipboard: {error}"),
+        };
+        if let Some(window) = window_weak.upgrade() {
+            render_state(&window, &state_for_copy.borrow(), &options_for_copy);
+        }
+    });
+
+    let window_weak = window.as_weak();
+    let state_for_new_chat = Rc::clone(&state);
+    let options_for_new_chat = transport_options.clone();
     window.on_new_chat(move || {
+        state_for_new_chat.borrow_mut().new_chat_open = true;
         if let Some(window) = window_weak.upgrade() {
-            window.set_new_chat_open(true);
-            set_status(&window, "New conversation");
+            render_state(&window, &state_for_new_chat.borrow(), &options_for_new_chat);
         }
     });
 
     let window_weak = window.as_weak();
+    let service_for_bundle = Arc::clone(&service);
+    let state_for_bundle = Rc::clone(&state);
+    let options_for_bundle = transport_options.clone();
     window.on_copy_bundle(move || {
         if let Some(window) = window_weak.upgrade() {
-            set_status(
-                &window,
-                copy_to_clipboard(
-                    window.get_public_bundle().to_string(),
-                    "Public bundle copied to clipboard.",
-                ),
-            );
+            let text = window.get_public_bundle().to_string();
+            state_for_bundle.borrow_mut().status = match service_for_bundle.copy_text(&text) {
+                Ok(()) => "Public bundle copied to clipboard.".to_owned(),
+                Err(error) => format!("Could not copy to clipboard: {error}"),
+            };
+            render_state(&window, &state_for_bundle.borrow(), &options_for_bundle);
         }
     });
 
     let window_weak = window.as_weak();
+    let service_for_fingerprint = Arc::clone(&service);
+    let state_for_fingerprint = Rc::clone(&state);
+    let options_for_fingerprint = transport_options.clone();
     window.on_copy_fingerprint(move || {
         if let Some(window) = window_weak.upgrade() {
-            set_status(
+            let text = window.get_fingerprint().to_string();
+            state_for_fingerprint.borrow_mut().status =
+                match service_for_fingerprint.copy_text(&text) {
+                    Ok(()) => "Fingerprint copied to clipboard.".to_owned(),
+                    Err(error) => format!("Could not copy to clipboard: {error}"),
+                };
+            render_state(
                 &window,
-                copy_to_clipboard(
-                    window.get_fingerprint().to_string(),
-                    "Fingerprint copied to clipboard.",
-                ),
+                &state_for_fingerprint.borrow(),
+                &options_for_fingerprint,
             );
         }
     });
 
     let event_window = window.as_weak();
     let event_service = Arc::clone(&service);
+    let event_state = Rc::clone(&state);
     let poll_service = Arc::clone(&service);
+    let poll_state = Rc::clone(&state);
+    let poll_options = transport_options.clone();
     let mut last_poll = Instant::now();
     let event_timer = slint::Timer::default();
     event_timer.start(
@@ -311,23 +373,52 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             if let Some(window) = event_window.upgrade() {
                 for event in event_service.drain_events() {
-                    apply_event(&window, event);
+                    apply_event(&window, &event_state, &event_service, event, &poll_options);
                 }
+                let snapshot = poll_state.borrow().clone();
                 if last_poll.elapsed() >= Duration::from_secs(3)
-                    && window.get_profile_ready()
-                    && window.get_conversation_selected()
-                    && window.get_selected_transport() == "Relay"
-                    && !window.get_chat_loading()
-                    && !window.get_contact_bundle().is_empty()
+                    && snapshot.profile_ready
+                    && snapshot.conversation_selected
+                    && snapshot.selected_transport == ui_service::TransportKind::Relay
+                    && !snapshot.chat_loading
+                    && !snapshot.contact_bundle.is_empty()
                 {
                     last_poll = Instant::now();
-                    let _ = poll_service.try_submit(Command::Poll {
-                        peer: window.get_contact_bundle().to_string(),
-                    });
+                    let command = Command::Poll {
+                        peer: snapshot.contact_bundle,
+                    };
+                    poll_state.borrow_mut().prepare(&command);
+                    render_state(&window, &poll_state.borrow(), &poll_options);
+                    let _ = poll_service.try_submit(command);
                 }
             }
         },
     );
 
     window.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_slint_message;
+    use crate::ui_service::ConversationMessage;
+
+    #[test]
+    fn chat_model_projection_preserves_fields_for_the_view() {
+        let message = to_slint_message(ConversationMessage {
+            sender: "Bob".to_owned(),
+            text: "A long message".to_owned(),
+            timestamp: 42,
+            outgoing: false,
+            status: "received".to_owned(),
+            ciphertext: "encrypted".to_owned(),
+        });
+
+        assert_eq!(message.sender.to_string(), "Bob");
+        assert_eq!(message.text.to_string(), "A long message");
+        assert_eq!(message.timestamp.to_string(), "42");
+        assert!(!message.outgoing);
+        assert_eq!(message.status.to_string(), "received");
+        assert_eq!(message.ciphertext.to_string(), "encrypted");
+    }
 }

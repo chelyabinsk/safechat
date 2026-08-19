@@ -4,7 +4,7 @@ version = "0.2.5"
 edition = "2024"
 
 [dependencies]
-slint = "1.13"
+slint = "=1.16.0"
 safechat-core = { path = "../core" }
 safechat-application = { path = "../application" }
 safechat-transports = { path = "../transports" }
@@ -12,7 +12,7 @@ anyhow = "1.0"
 directories = "6.0"
 base64 = "0.22"
 futures-executor = "0.3"
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+copypasta = "0.10.2"
 
 [build-dependencies]
-slint-build = "1.13"
+slint-build = "=1.16.0"

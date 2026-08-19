@@ -18,6 +18,10 @@ pub enum Command {
     LoadHistory {
         peer: String,
     },
+    LoadOlderHistory {
+        peer: String,
+        before: usize,
+    },
     Send {
         peer: String,
         transport: super::TransportKind,
@@ -48,6 +52,9 @@ pub enum Event {
         messages: Vec<ConversationMessage>,
         status: String,
         ciphertext: Option<String>,
+        history_cursor: usize,
+        has_more: bool,
+        prepend: bool,
     },
     Error {
         operation: Operation,
@@ -84,5 +91,19 @@ pub struct ServiceError {
 impl ServiceError {
     pub fn new(operation: Operation, source: anyhow::Error) -> Self {
         Self { operation, source }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Operation;
+
+    #[test]
+    fn operation_names_are_stable_for_user_facing_errors() {
+        assert_eq!(Operation::Profile.to_string(), "profile");
+        assert_eq!(Operation::Contact.to_string(), "contact");
+        assert_eq!(Operation::History.to_string(), "history");
+        assert_eq!(Operation::Chat.to_string(), "chat");
+        assert_eq!(Operation::Relay.to_string(), "relay");
     }
 }

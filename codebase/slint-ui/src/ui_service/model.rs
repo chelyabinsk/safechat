@@ -6,6 +6,15 @@ pub enum TransportKind {
     Relay,
 }
 
+impl std::fmt::Display for TransportKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::CopyPaste => "Copy/paste",
+            Self::Relay => "Relay",
+        })
+    }
+}
+
 impl TransportKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
