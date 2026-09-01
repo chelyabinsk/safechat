@@ -198,7 +198,7 @@ export component MainWindow inherits Window {
                             font-size: 12px;
                             horizontal-alignment: center;
                         }
-                        if root.conversation-selected && !root.chat-loading: HorizontalBox {
+                        if root.conversation-selected && !root.new-chat-open && !root.chat-loading: HorizontalBox {
                             height: 40px;
                             spacing: 8px;
                             message_input := LineEdit {
@@ -209,7 +209,7 @@ export component MainWindow inherits Window {
                             }
                             Button { text: "Send"; height: 40px; enabled: root.profile-ready; clicked => { root.send-message(message_input.text); message_input.text = ""; } }
                         }
-                        if root.conversation-selected && !root.chat-loading && root.selected-transport == "Copy/paste": HorizontalBox {
+                        if root.conversation-selected && !root.new-chat-open && !root.chat-loading && root.selected-transport == "Copy/paste": HorizontalBox {
                             height: 40px;
                             paste_input := LineEdit {
                                 placeholder-text: "Paste encrypted message here";

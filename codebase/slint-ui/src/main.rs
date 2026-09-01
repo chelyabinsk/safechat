@@ -2,6 +2,7 @@ slint::include_modules!();
 
 mod ui_service;
 
+use chrono::{DateTime, Local, TimeDelta, Utc};
 use clap::Parser;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,11 +21,31 @@ struct Cli {
     headless: bool,
 }
 
+fn format_timestamp(timestamp: u64) -> String {
+    let Ok(timestamp) = i64::try_from(timestamp) else {
+        return timestamp.to_string();
+    };
+    let Some(utc_time) = DateTime::<Utc>::from_timestamp(timestamp, 0) else {
+        return timestamp.to_string();
+    };
+    let local_time = utc_time.with_timezone(&Local);
+    let now = Local::now();
+    let today = now.date_naive();
+    let date = local_time.date_naive();
+    if date == today {
+        format!("Today, {}", local_time.format("%H:%M"))
+    } else if date == (now - TimeDelta::days(1)).date_naive() {
+        format!("Yesterday, {}", local_time.format("%H:%M"))
+    } else {
+        local_time.format("%Y-%m-%d %H:%M").to_string()
+    }
+}
+
 fn to_slint_message(message: ui_service::ConversationMessage) -> ChatMessage {
     ChatMessage {
         sender: message.sender.into(),
         text: message.text.into(),
-        timestamp: message.timestamp.to_string().into(),
+        timestamp: format_timestamp(message.timestamp).into(),
         outgoing: message.outgoing,
         status: message.status.into(),
         ciphertext: message.ciphertext.into(),
@@ -573,7 +594,7 @@ mod tests {
 
         assert_eq!(message.sender.to_string(), "Bob");
         assert_eq!(message.text.to_string(), "A long message");
-        assert_eq!(message.timestamp.to_string(), "42");
+        assert!(message.timestamp.to_string().starts_with("1970-01-01 "));
         assert!(!message.outgoing);
         assert_eq!(message.status.to_string(), "received");
         assert_eq!(message.ciphertext.to_string(), "encrypted");
