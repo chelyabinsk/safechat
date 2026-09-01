@@ -156,7 +156,7 @@ pub(super) fn perform_paste_send(
     history_store.save(&session.profile, &session.password, &conversation, &history)?;
     Ok((
         render_history_page(&history, None),
-        "Encrypted message copied. Paste it into the recipient’s chat.".to_owned(),
+        "Encrypted message ready. Click the message to copy its ciphertext.".to_owned(),
         encoded,
     ))
 }

@@ -12,23 +12,33 @@ pub struct UiService {
     commands: SyncSender<Command>,
     events: Arc<Mutex<Receiver<Event>>>,
     ports: Arc<ServicePorts>,
+    debug: bool,
 }
 
 impl UiService {
     pub fn new() -> Self {
-        Self::with_ports(ServicePorts::production())
+        Self::new_with_debug(false)
+    }
+
+    pub fn new_with_debug(debug: bool) -> Self {
+        Self::with_ports_and_debug(ServicePorts::production(), debug)
     }
 
     pub fn with_ports(ports: ServicePorts) -> Self {
+        Self::with_ports_and_debug(ports, false)
+    }
+
+    fn with_ports_and_debug(ports: ServicePorts, debug: bool) -> Self {
         let (commands, command_rx) = mpsc::sync_channel(COMMAND_QUEUE_SIZE);
         let (event_tx, event_rx) = mpsc::channel();
         let ports = Arc::new(ports);
         let worker_ports = Arc::clone(&ports);
-        thread::spawn(move || worker_loop(command_rx, event_tx, worker_ports));
+        thread::spawn(move || worker_loop(command_rx, event_tx, worker_ports, debug));
         Self {
             commands,
             events: Arc::new(Mutex::new(event_rx)),
             ports,
+            debug,
         }
     }
 
@@ -51,6 +61,11 @@ impl UiService {
     }
 
     pub fn submit(&self, command: Command) -> Result<()> {
+        let operation = command.operation();
+        eprintln_if_debug(
+            self.debug,
+            format_args!("queued {operation} operation via submit()"),
+        );
         self.commands
             .try_send(command)
             .map_err(|error| match error {
@@ -60,7 +75,13 @@ impl UiService {
     }
 
     pub fn try_submit(&self, command: Command) -> bool {
-        self.commands.try_send(command).is_ok()
+        let operation = command.operation();
+        let accepted = self.commands.try_send(command).is_ok();
+        eprintln_if_debug(
+            self.debug,
+            format_args!("poll {operation} operation queue accepted={accepted}"),
+        );
+        accepted
     }
 
     pub fn drain_events(&self) -> Vec<Event> {
@@ -71,9 +92,27 @@ impl UiService {
     }
 }
 
-fn worker_loop(commands: Receiver<Command>, events: mpsc::Sender<Event>, ports: Arc<ServicePorts>) {
+fn eprintln_if_debug(debug: bool, message: std::fmt::Arguments<'_>) {
+    if debug {
+        eprintln!("safechat debug: {message}");
+    }
+}
+
+fn worker_loop(
+    commands: Receiver<Command>,
+    events: mpsc::Sender<Event>,
+    ports: Arc<ServicePorts>,
+    debug: bool,
+) {
     let mut session: Option<ProfileSession> = None;
+    if debug {
+        eprintln!("safechat debug: UI worker started");
+    }
     while let Ok(command) = commands.recv() {
+        let operation = command.operation();
+        if debug {
+            eprintln!("safechat debug: starting {operation} operation");
+        }
         match handle_command(&mut session, command, &ports) {
             Err(error) => {
                 eprintln!(
@@ -86,10 +125,23 @@ fn worker_loop(commands: Receiver<Command>, events: mpsc::Sender<Event>, ports: 
                 });
             }
             Ok(Some(event)) => {
+                if debug {
+                    eprintln!(
+                        "safechat debug: completed {operation} operation; sending {} event",
+                        event.kind()
+                    );
+                }
                 let _ = events.send(event);
             }
-            Ok(None) => {}
+            Ok(None) => {
+                if debug {
+                    eprintln!("safechat debug: completed {operation} operation");
+                }
+            }
         }
+    }
+    if debug {
+        eprintln!("safechat debug: UI worker stopped");
     }
 }
 

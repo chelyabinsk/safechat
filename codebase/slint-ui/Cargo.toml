@@ -9,6 +9,7 @@ safechat-core = { path = "../core" }
 safechat-application = { path = "../application" }
 safechat-transports = { path = "../transports" }
 anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
 directories = "6.0"
 base64 = "0.22"
 futures-executor = "0.3"

@@ -1,4 +1,4 @@
-import { Button, ComboBox, GroupBox, HorizontalBox, LineEdit, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, GroupBox, HorizontalBox, LineEdit, ListView, VerticalBox } from "std-widgets.slint";
 
 export struct ChatMessage {
     sender: string,
@@ -25,6 +25,8 @@ export component MainWindow inherits Window {
     in-out property <bool> contact-added: false;
     in-out property <bool> conversation-selected: false;
     in-out property <bool> chat-loading: false;
+    in-out property <bool> history-loading: false;
+    in-out property <string> loading-text: "Decrypting chat history…";
     in-out property <[ChatMessage]> chat-messages: [];
     in-out property <string> selected-transport: "Copy/paste";
     in-out property <[string]> transport-options: [];
@@ -63,7 +65,7 @@ export component MainWindow inherits Window {
                     padding-right: 22px;
                     Text { text: "SafeChat"; color: white; font-size: 24px; }
                     Text { text: "  " + root.profile-name; color: #d7f5ef; horizontal-stretch: 1; }
-                    if root.conversation-selected && !root.chat-loading: ComboBox {
+                    if root.conversation-selected && !root.history-loading: ComboBox {
                         model: root.transport-options;
                         selected(value) => { root.selected-transport = value; root.choose-transport(value); }
                     }
@@ -111,22 +113,20 @@ export component MainWindow inherits Window {
                     VerticalBox {
                         padding: 24px;
                         spacing: 12px;
-                        if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.chat-loading: Text {
+                        if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading: Text {
                             text: "Conversation with " + root.contact-name;
                             font-size: 24px;
                             color: #41525d;
                             horizontal-alignment: center;
                         }
-                        if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.chat-loading && root.history-has-more: Button {
+                        if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading && !root.chat-loading && root.history-has-more: Button {
                             text: "Load older messages";
                             clicked => { root.load-older-history(); }
                         }
-                        if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.chat-loading: chat_flickable := Flickable {
+                        if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading: ListView {
                             vertical-stretch: 1;
-                            viewport-y: root.scroll-generation > 0 ? 100000px : 0px;
-                            VerticalBox {
-                                    width: parent.width;
-                                    for message in root.chat-messages: HorizontalBox {
+                            for message in root.chat-messages: HorizontalBox {
+                                width: parent.width;
                                     Rectangle { horizontal-stretch: message.outgoing ? 1 : 0; }
                                     message_area := TouchArea {
                                         width: 360px;
@@ -158,10 +158,9 @@ export component MainWindow inherits Window {
                                             }
                                         }
                                     }
-                                    Rectangle { horizontal-stretch: message.outgoing ? 0 : 1; }
-                                    }
-                                }
+                                Rectangle { horizontal-stretch: message.outgoing ? 0 : 1; }
                             }
+                        }
                         if root.new-chat-open: GroupBox {
                             title: "New conversation";
                             width: 520px;
@@ -193,28 +192,33 @@ export component MainWindow inherits Window {
                         }
                         if !root.chat-loading: Text { text: root.status-text; color: #667781; horizontal-alignment: center; }
                         if root.conversation-selected && root.chat-loading: Text {
-                            text: "Decrypting chat history…";
+                            text: root.loading-text;
                             color: #667781;
                             font-size: 12px;
                             horizontal-alignment: center;
                         }
                         if root.conversation-selected && !root.chat-loading: HorizontalBox {
+                            height: 40px;
                             spacing: 8px;
                             message_input := LineEdit {
                                 placeholder-text: "Type a message";
                                 horizontal-stretch: 1;
+                                height: 40px;
                                 enabled: root.profile-ready;
                             }
-                            Button { text: "Send"; enabled: root.profile-ready; clicked => { root.send-message(message_input.text); message_input.text = ""; } }
+                            Button { text: "Send"; height: 40px; enabled: root.profile-ready; clicked => { root.send-message(message_input.text); message_input.text = ""; } }
                         }
                         if root.conversation-selected && !root.chat-loading && root.selected-transport == "Copy/paste": HorizontalBox {
+                            height: 40px;
                             paste_input := LineEdit {
                                 placeholder-text: "Paste encrypted message here";
                                 horizontal-stretch: 1;
+                                height: 40px;
                                 enabled: root.profile-ready;
                             }
                             Button {
                                 text: "Receive pasted";
+                                height: 40px;
                                 enabled: root.profile-ready;
                                 clicked => { root.receive-pasted(paste_input.text); paste_input.text = ""; }
                             }

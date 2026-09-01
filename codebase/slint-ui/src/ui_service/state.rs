@@ -18,6 +18,8 @@ pub struct UiState {
     pub contact_added: bool,
     pub conversation_selected: bool,
     pub chat_loading: bool,
+    pub history_loading: bool,
+    pub loading_text: String,
     pub messages: Vec<ConversationMessage>,
     pub selected_transport: TransportKind,
     pub new_chat_open: bool,
@@ -46,6 +48,8 @@ impl UiState {
             contact_added: false,
             conversation_selected: false,
             chat_loading: false,
+            history_loading: false,
+            loading_text: "Decrypting chat history…".to_owned(),
             messages: Vec::new(),
             selected_transport: TransportKind::CopyPaste,
             new_chat_open: false,
@@ -65,14 +69,20 @@ impl UiState {
             | Command::LoadOlderHistory { .. }
             | Command::Poll { .. } => {
                 self.chat_loading = true;
+                self.history_loading = true;
+                self.loading_text = "Decrypting chat history…".to_owned();
                 self.status = "Conversation selected.".to_owned();
             }
             Command::Send { .. } => {
                 self.chat_loading = true;
+                self.history_loading = false;
+                self.loading_text = "Encrypting and sending…".to_owned();
                 self.status = "Encrypting and sending…".to_owned();
             }
             Command::ReceivePasted { .. } => {
                 self.chat_loading = true;
+                self.history_loading = false;
+                self.loading_text = "Decrypting pasted message…".to_owned();
                 self.status = "Decrypting pasted message…".to_owned();
             }
         }
@@ -111,6 +121,7 @@ impl UiState {
                 self.contact_added = true;
                 self.conversation_selected = false;
                 self.chat_loading = false;
+                self.history_loading = false;
                 self.new_chat_open = false;
                 self.status = status.clone();
             }
@@ -136,10 +147,12 @@ impl UiState {
                     self.scroll_generation = self.scroll_generation.wrapping_add(1);
                 }
                 self.chat_loading = false;
+                self.history_loading = false;
                 self.status = status.clone();
             }
             Event::Error { operation, message } => {
                 self.chat_loading = false;
+                self.history_loading = false;
                 self.status = format!("{operation} failed: {message}");
             }
         }
@@ -181,5 +194,20 @@ mod tests {
         let mut state = UiState::from_profiles(Vec::new());
         state.select_transport(TransportKind::Relay);
         assert_eq!(state.selected_transport, TransportKind::Relay);
+    }
+
+    #[test]
+    fn loading_text_identifies_the_active_chat_operation() {
+        let mut state = UiState::from_profiles(vec!["alice".to_owned()]);
+        state.prepare(&Command::LoadHistory {
+            peer: "peer".to_owned(),
+        });
+        assert_eq!(state.loading_text, "Decrypting chat history…");
+        state.prepare(&Command::Send {
+            peer: "peer".to_owned(),
+            transport: TransportKind::CopyPaste,
+            text: "hello".to_owned(),
+        });
+        assert_eq!(state.loading_text, "Encrypting and sending…");
     }
 }

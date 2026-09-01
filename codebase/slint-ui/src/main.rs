@@ -2,11 +2,23 @@ slint::include_modules!();
 
 mod ui_service;
 
+use clap::Parser;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ui_service::{Command, Event, UiService, UiState};
+
+#[derive(Parser)]
+#[command(name = "safechat-slint-ui", version, about = "SafeChat desktop client")]
+struct Cli {
+    /// Print diagnostic operation messages to the launching console.
+    #[arg(long)]
+    debug: bool,
+    /// Run the UI state/model smoke test without opening a graphical window.
+    #[arg(long)]
+    headless: bool,
+}
 
 fn to_slint_message(message: ui_service::ConversationMessage) -> ChatMessage {
     ChatMessage {
@@ -48,6 +60,8 @@ fn render_state(window: &MainWindow, state: &UiState, transport_options: &[Strin
     window.set_contact_added(state.contact_added);
     window.set_conversation_selected(state.conversation_selected);
     window.set_chat_loading(state.chat_loading);
+    window.set_history_loading(state.history_loading);
+    window.set_loading_text(state.loading_text.clone().into());
     window.set_new_chat_open(state.new_chat_open);
     window.set_profile_info_open(state.profile_info_open);
     window.set_history_has_more(state.history_has_more);
@@ -66,35 +80,122 @@ fn render_state(window: &MainWindow, state: &UiState, transport_options: &[Strin
 fn apply_event(
     window: &MainWindow,
     state: &Rc<RefCell<UiState>>,
-    service: &UiService,
     event: Event,
     transport_options: &[String],
+    debug: bool,
 ) {
-    let copy_request = match &event {
-        Event::ChatUpdated {
-            ciphertext: Some(ciphertext),
-            ..
-        } => Some(ciphertext.clone()),
-        _ => None,
-    };
+    if debug {
+        eprintln!(
+            "safechat debug: UI received {} event; messages_before={}",
+            event.kind(),
+            state.borrow().messages.len()
+        );
+    }
     state.borrow_mut().apply(&event);
+    if debug {
+        let state = state.borrow();
+        eprintln!(
+            "safechat debug: UI applied {} event; messages_after={} chat_loading={} history_loading={} conversation_selected={}",
+            event.kind(),
+            state.messages.len(),
+            state.chat_loading,
+            state.history_loading,
+            state.conversation_selected,
+        );
+    }
     render_state(window, &state.borrow(), transport_options);
-    if let Some(text) = copy_request {
-        state.borrow_mut().status = match service.copy_text(&text) {
-            Ok(()) => "Encrypted message copied. Paste it into the recipient’s chat.".to_owned(),
-            Err(error) => format!("Could not copy to clipboard: {error}"),
-        };
-        render_state(window, &state.borrow(), transport_options);
+    if debug {
+        eprintln!("safechat debug: UI rendered {} event", event.kind());
     }
 }
 
+fn run_headless_smoke_test(debug: bool) -> Result<(), String> {
+    if debug {
+        eprintln!("safechat debug: starting headless UI smoke test");
+    }
+
+    let mut state = UiState::from_profiles(vec!["alice".to_owned()]);
+    state.apply(&Event::ProfileReady {
+        profile: "alice".to_owned(),
+        fingerprint: "fingerprint".to_owned(),
+        bundle: "bundle".to_owned(),
+        contact: Some(("Bob".to_owned(), "peer-bundle".to_owned())),
+    });
+    state.conversation_selected = true;
+
+    let messages = (0..10)
+        .map(|index| ui_service::ConversationMessage {
+            sender: if index % 2 == 0 {
+                "You".to_owned()
+            } else {
+                "Bob".to_owned()
+            },
+            text: format!("headless message {index}"),
+            timestamp: index,
+            outgoing: index % 2 == 0,
+            status: "sent".to_owned(),
+            ciphertext: "test-ciphertext".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    state.apply(&Event::ChatUpdated {
+        messages,
+        status: "Message sent.".to_owned(),
+        ciphertext: None,
+        history_cursor: 0,
+        has_more: false,
+        prepend: false,
+    });
+
+    if state.messages.len() != 10 {
+        return Err(format!(
+            "expected 10 messages after ChatUpdated, got {}",
+            state.messages.len()
+        ));
+    }
+    if state.chat_loading || state.history_loading {
+        return Err("chat remained in a loading state after ChatUpdated".to_owned());
+    }
+    let projected = state
+        .messages
+        .iter()
+        .cloned()
+        .map(to_slint_message)
+        .collect::<Vec<_>>();
+    if projected.len() != 10 || projected[9].text != "headless message 9" {
+        return Err("chat message model projection failed".to_owned());
+    }
+
+    if debug {
+        eprintln!(
+            "safechat debug: headless UI smoke test passed; projected_messages={}",
+            projected.len()
+        );
+    }
+    println!("headless UI smoke test passed (10 messages rendered through the UI model)");
+    Ok(())
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    let cli = Cli::parse();
+    if cli.headless {
+        return run_headless_smoke_test(cli.debug).map_err(slint::PlatformError::Other);
+    }
+    if cli.debug {
+        eprintln!("safechat debug: GUI starting");
+    }
     let window = MainWindow::new()?;
-    let service = Arc::new(UiService::new());
+    let service = Arc::new(UiService::new_with_debug(cli.debug));
     let profiles = service
         .available_profiles()
         .map_err(|error| slint::PlatformError::Other(error.to_string()))?;
     let transport_options = service.transport_options();
+    if cli.debug {
+        eprintln!(
+            "safechat debug: loaded {} profiles; transports={:?}",
+            profiles.len(),
+            transport_options
+        );
+    }
     let state = Rc::new(RefCell::new(UiState::from_profiles(profiles)));
     render_state(&window, &state.borrow(), &transport_options);
 
@@ -198,6 +299,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Err(error) = service_for_select.submit(command) {
                 state_for_select.borrow_mut().status = format!("Could not open chat: {error}");
                 state_for_select.borrow_mut().chat_loading = false;
+                state_for_select.borrow_mut().history_loading = false;
                 render_state(&window, &state_for_select.borrow(), &options_for_select);
             }
         }
@@ -224,6 +326,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 state_for_older.borrow_mut().status =
                     format!("Could not load older messages: {error}");
                 state_for_older.borrow_mut().chat_loading = false;
+                state_for_older.borrow_mut().history_loading = false;
                 render_state(&window, &state_for_older.borrow(), &options_for_older);
             }
         }
@@ -250,8 +353,18 @@ fn main() -> Result<(), slint::PlatformError> {
     let service_for_send = Arc::clone(&service);
     let state_for_send = Rc::clone(&state);
     let options_for_send = transport_options.clone();
+    let debug_for_send = cli.debug;
     window.on_send_message(move |message| {
         let state_snapshot = state_for_send.borrow().clone();
+        if debug_for_send {
+            eprintln!(
+                "safechat debug: send callback invoked; text_len={} trimmed_len={} contact_selected={} transport={}",
+                message.len(),
+                message.trim().len(),
+                !state_snapshot.contact_bundle.is_empty(),
+                state_snapshot.selected_transport,
+            );
+        }
         if state_snapshot.contact_bundle.is_empty() {
             state_for_send.borrow_mut().status = "Add and select a contact first.".to_owned();
         } else if message.trim().is_empty() {
@@ -266,7 +379,17 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Err(error) = service_for_send.submit(command) {
                 state_for_send.borrow_mut().status = format!("Could not send message: {error}");
                 state_for_send.borrow_mut().chat_loading = false;
+                state_for_send.borrow_mut().history_loading = false;
             }
+        }
+        if debug_for_send {
+            let state = state_for_send.borrow();
+            eprintln!(
+                "safechat debug: send callback finished; status={:?} chat_loading={} messages={}",
+                state.status,
+                state.chat_loading,
+                state.messages.len(),
+            );
         }
         if let Some(window) = window_weak.upgrade() {
             render_state(&window, &state_for_send.borrow(), &options_for_send);
@@ -293,6 +416,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 state_for_receive.borrow_mut().status =
                     format!("Could not receive message: {error}");
                 state_for_receive.borrow_mut().chat_loading = false;
+                state_for_receive.borrow_mut().history_loading = false;
             }
         }
         if let Some(window) = window_weak.upgrade() {
@@ -365,6 +489,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let poll_service = Arc::clone(&service);
     let poll_state = Rc::clone(&state);
     let poll_options = transport_options.clone();
+    let debug_for_events = cli.debug;
     let mut last_poll = Instant::now();
     let event_timer = slint::Timer::default();
     event_timer.start(
@@ -372,8 +497,21 @@ fn main() -> Result<(), slint::PlatformError> {
         Duration::from_millis(100),
         move || {
             if let Some(window) = event_window.upgrade() {
-                for event in event_service.drain_events() {
-                    apply_event(&window, &event_state, &event_service, event, &poll_options);
+                let events = event_service.drain_events();
+                if debug_for_events && !events.is_empty() {
+                    eprintln!(
+                        "safechat debug: UI event timer drained {} event(s)",
+                        events.len()
+                    );
+                }
+                for event in events {
+                    apply_event(
+                        &window,
+                        &event_state,
+                        event,
+                        &poll_options,
+                        debug_for_events,
+                    );
                 }
                 let snapshot = poll_state.borrow().clone();
                 if last_poll.elapsed() >= Duration::from_secs(3)

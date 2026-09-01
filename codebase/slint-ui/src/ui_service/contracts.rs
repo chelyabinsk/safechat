@@ -36,6 +36,25 @@ pub enum Command {
     },
 }
 
+impl Command {
+    pub fn operation(&self) -> Operation {
+        match self {
+            Self::Initialize { .. } => Operation::Profile,
+            Self::VerifyContact { .. } => Operation::Contact,
+            Self::LoadHistory { .. } | Self::LoadOlderHistory { .. } => Operation::History,
+            Self::Send { transport, .. } => {
+                if matches!(transport, super::TransportKind::Relay) {
+                    Operation::Relay
+                } else {
+                    Operation::Chat
+                }
+            }
+            Self::Poll { .. } => Operation::Relay,
+            Self::ReceivePasted { .. } => Operation::Chat,
+        }
+    }
+}
+
 pub enum Event {
     ProfileReady {
         profile: String,
@@ -60,6 +79,17 @@ pub enum Event {
         operation: Operation,
         message: String,
     },
+}
+
+impl Event {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ProfileReady { .. } => "ProfileReady",
+            Self::ContactAdded { .. } => "ContactAdded",
+            Self::ChatUpdated { .. } => "ChatUpdated",
+            Self::Error { .. } => "Error",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
