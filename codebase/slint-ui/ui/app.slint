@@ -37,6 +37,7 @@ export component MainWindow inherits Window {
     in-out property <bool> profile-info-open: false;
     in-out property <bool> history-has-more: false;
     in-out property <int> scroll-generation: 0;
+    in-out property <string> copied-ciphertext: "";
     callback choose-transport(string);
     callback send-message(string);
     callback initialize-profile(string, string, string);
@@ -135,7 +136,10 @@ export component MainWindow inherits Window {
                                         message_bubble := Rectangle {
                                             width: parent.width;
                                             height: max(72px, message_content.preferred-height);
-                                            background: message.outgoing ? #d9fdd3 : white;
+                                            background: message.ciphertext == root.copied-ciphertext
+                                                ? #b7ebc6
+                                                : message.outgoing ? #d9fdd3 : white;
+                                            animate background { duration: 180ms; }
                                             border-radius: 10px;
                                             message_content := VerticalBox {
                                                 width: parent.width;
@@ -147,14 +151,6 @@ export component MainWindow inherits Window {
                                                     Text { text: message.timestamp; color: #8696a0; font-size: 10px; horizontal-stretch: 1; }
                                                     if message.outgoing: Text { text: message.status; color: #667781; font-size: 10px; }
                                                 }
-                                            }
-                                            if message.outgoing && message_area.has-hover: Button {
-                                                text: "Copy ciphertext";
-                                                x: parent.width - 108px;
-                                                y: 2px;
-                                                width: 100px;
-                                                height: 18px;
-                                                clicked => { root.copy-ciphertext(message.ciphertext); }
                                             }
                                         }
                                     }

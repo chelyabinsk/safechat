@@ -427,15 +427,34 @@ fn main() -> Result<(), slint::PlatformError> {
     let window_weak = window.as_weak();
     let service_for_copy = Arc::clone(&service);
     let state_for_copy = Rc::clone(&state);
-    let options_for_copy = transport_options.clone();
+    let copy_feedback_timer = slint::Timer::default();
     window.on_copy_ciphertext(move |text| {
-        state_for_copy.borrow_mut().status = match service_for_copy.copy_text(text.as_str()) {
-            Ok(()) => "Ciphertext copied to clipboard.".to_owned(),
+        let status = match service_for_copy.copy_text(text.as_str()) {
+            Ok(()) => {
+                if let Some(window) = window_weak.upgrade() {
+                    window.set_copied_ciphertext(text.clone());
+                }
+                "Ciphertext copied to clipboard.".to_owned()
+            }
             Err(error) => format!("Could not copy to clipboard: {error}"),
         };
+        state_for_copy.borrow_mut().status = status;
         if let Some(window) = window_weak.upgrade() {
-            render_state(&window, &state_for_copy.borrow(), &options_for_copy);
+            window.set_status_text(state_for_copy.borrow().status.clone().into());
         }
+        let timer_window = window_weak.clone();
+        copy_feedback_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(1500),
+            move || {
+                if let Some(window) = timer_window.upgrade() {
+                    window.set_copied_ciphertext("".into());
+                    if window.get_status_text() == "Ciphertext copied to clipboard." {
+                        window.set_status_text("Ready".into());
+                    }
+                }
+            },
+        );
     });
 
     let window_weak = window.as_weak();
