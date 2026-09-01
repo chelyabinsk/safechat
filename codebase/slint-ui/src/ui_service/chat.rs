@@ -160,16 +160,14 @@ pub(super) fn perform_paste_send(
     let (message_id, envelope) =
         futures_executor::block_on(state.encrypt_message_for(&peer, plaintext.as_bytes()))?;
     let encoded = TextTransport.encode(&envelope).trim().to_owned();
-    history.entries.push(HistoryEntry {
-        timestamp: clock.now(),
-        sender: "you".to_owned(),
-        text: plaintext.to_owned(),
-        message_id: message_id.encode(),
-        peer: peer.address().to_string(),
-        ciphertext: encoded.clone(),
-        delivery_status: "copied".to_owned(),
-        transport_recipient: peer.address().to_string(),
-    });
+    history.entries.push(
+        HistoryEntry::new(clock.now(), "you", plaintext)
+            .with_message_id(message_id.encode())
+            .with_peer(peer.address().to_string())
+            .with_ciphertext(encoded.clone())
+            .with_delivery_status("copied")
+            .with_transport_recipient(peer.address().to_string()),
+    );
     history_store.save(&session.profile, &session.password, &conversation, &history)?;
     Ok((
         render_history_page(&history, None),
@@ -202,16 +200,13 @@ pub(super) fn perform_paste_receive(
     {
         let text =
             String::from_utf8(message.plaintext).context("decrypted message is not UTF-8 text")?;
-        history.entries.push(HistoryEntry {
-            timestamp: clock.now(),
-            sender: peer.name.clone(),
-            text,
-            message_id,
-            peer: peer.address().to_string(),
-            ciphertext: encoded_ciphertext.trim().to_owned(),
-            delivery_status: "received".to_owned(),
-            transport_recipient: String::new(),
-        });
+        history.entries.push(
+            HistoryEntry::new(clock.now(), peer.name.clone(), text)
+                .with_message_id(message_id)
+                .with_peer(peer.address().to_string())
+                .with_ciphertext(encoded_ciphertext.trim())
+                .with_delivery_status("received"),
+        );
         history_store.save(&session.profile, &session.password, &conversation, &history)?;
     }
     Ok((
@@ -305,36 +300,24 @@ pub(super) fn perform_chat_action(
 #[cfg(test)]
 mod tests {
     use super::{HISTORY_PAGE_SIZE, render_history, render_history_page};
-    use safechat_core::profile_store::{HistoryEntry, HistoryFile, PROFILE_VERSION};
+    use safechat_core::profile_store::{HistoryEntry, HistoryFile};
 
     #[test]
     fn render_history_preserves_message_state_and_labels_local_sender() {
-        let history = HistoryFile {
-            version: PROFILE_VERSION,
-            transport_cursor: 4,
-            entries: vec![
-                HistoryEntry {
-                    timestamp: 10,
-                    sender: "you".to_owned(),
-                    text: "hello".to_owned(),
-                    message_id: "outgoing-id".to_owned(),
-                    peer: "peer".to_owned(),
-                    ciphertext: "ciphertext-1".to_owned(),
-                    delivery_status: "copied".to_owned(),
-                    transport_recipient: "recipient".to_owned(),
-                },
-                HistoryEntry {
-                    timestamp: 11,
-                    sender: "Bob".to_owned(),
-                    text: "hi".to_owned(),
-                    message_id: "incoming-id".to_owned(),
-                    peer: "peer".to_owned(),
-                    ciphertext: "ciphertext-2".to_owned(),
-                    delivery_status: "received".to_owned(),
-                    transport_recipient: String::new(),
-                },
-            ],
-        };
+        let history = HistoryFile::new(vec![
+            HistoryEntry::new(10, "you", "hello")
+                .with_message_id("outgoing-id")
+                .with_peer("peer")
+                .with_ciphertext("ciphertext-1")
+                .with_delivery_status("copied")
+                .with_transport_recipient("recipient"),
+            HistoryEntry::new(11, "Bob", "hi")
+                .with_message_id("incoming-id")
+                .with_peer("peer")
+                .with_ciphertext("ciphertext-2")
+                .with_delivery_status("received"),
+        ])
+        .with_transport_cursor(4);
 
         let messages = render_history(&history);
 
@@ -351,11 +334,7 @@ mod tests {
 
     #[test]
     fn render_history_empty_file_has_no_bubbles() {
-        let history = HistoryFile {
-            version: PROFILE_VERSION,
-            transport_cursor: 0,
-            entries: Vec::new(),
-        };
+        let history = HistoryFile::empty();
 
         assert!(render_history(&history).is_empty());
     }
@@ -363,22 +342,13 @@ mod tests {
     #[test]
     fn history_pages_start_at_the_latest_messages() {
         let entries = (0..(HISTORY_PAGE_SIZE + 2))
-            .map(|index| HistoryEntry {
-                timestamp: index as u64,
-                sender: "Bob".to_owned(),
-                text: index.to_string(),
-                message_id: index.to_string(),
-                peer: "peer".to_owned(),
-                ciphertext: String::new(),
-                delivery_status: String::new(),
-                transport_recipient: String::new(),
+            .map(|index| {
+                HistoryEntry::new(index as u64, "Bob", index.to_string())
+                    .with_message_id(index.to_string())
+                    .with_peer("peer")
             })
             .collect();
-        let history = HistoryFile {
-            version: PROFILE_VERSION,
-            transport_cursor: 0,
-            entries,
-        };
+        let history = HistoryFile::new(entries);
         let page = render_history_page(&history, None);
         assert_eq!(page.messages.first().unwrap().text, "2");
         assert_eq!(

@@ -60,16 +60,14 @@ impl<'a> ChatService<'a> {
         let message_id = message_id.encode();
         let timestamp = now();
         let text = String::from_utf8_lossy(plaintext).into_owned();
-        history.entries.push(HistoryEntry {
-            timestamp,
-            sender: "you".to_owned(),
-            text: text.clone(),
-            message_id: message_id.clone(),
-            peer: peer.address().to_string(),
-            ciphertext: TextTransport.encode(&envelope).trim().to_owned(),
-            delivery_status: "queued".to_owned(),
-            transport_recipient: recipient.to_owned(),
-        });
+        history.entries.push(
+            HistoryEntry::new(timestamp, "you", text.clone())
+                .with_message_id(message_id.clone())
+                .with_peer(peer.address().to_string())
+                .with_ciphertext(TextTransport.encode(&envelope).trim())
+                .with_delivery_status("queued")
+                .with_transport_recipient(recipient),
+        );
         // Persist before submission so an accepted message can be retried with
         // the same authenticated message ID after a process crash.
         self.history_store.save(&self.conversation, history)?;
@@ -180,16 +178,13 @@ impl<'a> ChatService<'a> {
                 let text = String::from_utf8(decoded.plaintext)
                     .context("decrypted message is not UTF-8 text")?;
                 let timestamp = now();
-                history.entries.push(HistoryEntry {
-                    timestamp,
-                    sender: peer.name.clone(),
-                    text: text.clone(),
-                    message_id,
-                    peer: peer.address().to_string(),
-                    ciphertext: TextTransport.encode(&message.ciphertext).trim().to_owned(),
-                    delivery_status: "received".to_owned(),
-                    transport_recipient: String::new(),
-                });
+                history.entries.push(
+                    HistoryEntry::new(timestamp, peer.name.clone(), text.clone())
+                        .with_message_id(message_id)
+                        .with_peer(peer.address().to_string())
+                        .with_ciphertext(TextTransport.encode(&message.ciphertext).trim())
+                        .with_delivery_status("received"),
+                );
                 self.history_store.save(&self.conversation, history)?;
                 events.push(ChatEvent::Received {
                     timestamp,
@@ -226,7 +221,7 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use safechat_core::profile_store::{HistoryStore, PROFILE_VERSION};
+    use safechat_core::profile_store::HistoryStore;
     use safechat_core::transport::TransportMessage;
     use std::path::PathBuf;
 
@@ -236,11 +231,11 @@ mod tests {
 
     impl HistoryStore for MemoryHistoryStore {
         fn load(&mut self, _conversation: &str) -> Result<HistoryFile> {
-            Ok(self.saves.last().cloned().unwrap_or(HistoryFile {
-                version: PROFILE_VERSION,
-                entries: Vec::new(),
-                transport_cursor: 0,
-            }))
+            Ok(self
+                .saves
+                .last()
+                .cloned()
+                .unwrap_or_else(HistoryFile::empty))
         }
 
         fn save(&mut self, _conversation: &str, history: &HistoryFile) -> Result<()> {
@@ -327,11 +322,7 @@ mod tests {
             acknowledgements: Vec::new(),
         };
         let mut store = MemoryHistoryStore { saves: Vec::new() };
-        let mut history = HistoryFile {
-            version: PROFILE_VERSION,
-            entries: Vec::new(),
-            transport_cursor: 0,
-        };
+        let mut history = HistoryFile::empty();
         let result = ChatService::new(
             &mut alice,
             &mut transport,
@@ -389,15 +380,15 @@ mod tests {
                     .unwrap();
                 (alice, bob_bundle, envelope, alice_path, bob_path)
             });
-        let incoming = TransportMessage {
-            transport_id: "42".to_owned(),
-            sender: "bob-client".to_owned(),
-            sender_address: Some(bob_bundle.address().to_string()),
-            message_id: String::new(),
-            ciphertext: envelope,
-            accepted_at: 1,
-            expires_at: None,
-        };
+        let incoming = TransportMessage::new(
+            "42",
+            "bob-client",
+            Some(bob_bundle.address().to_string()),
+            "",
+            envelope,
+            1,
+            None,
+        );
         let mut transport = TestTransport {
             fail_send: false,
             sent: Vec::new(),
@@ -406,11 +397,7 @@ mod tests {
             acknowledgements: Vec::new(),
         };
         let mut store = MemoryHistoryStore { saves: Vec::new() };
-        let mut history = HistoryFile {
-            version: PROFILE_VERSION,
-            entries: Vec::new(),
-            transport_cursor: 0,
-        };
+        let mut history = HistoryFile::empty();
         let events = ChatService::new(
             &mut alice,
             &mut transport,

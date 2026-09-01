@@ -17,6 +17,7 @@ use signal_protocol::{
     process_prekey_bundle,
 };
 use signal_rand::{CryptoRng, Rng, TryRngCore};
+use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -142,6 +143,40 @@ impl IdentityRecoveryRecord {
 pub struct SignalEnvelope {
     pub message_type: u8,
     pub ciphertext: Vec<u8>,
+}
+
+/// Stable SafeChat representation of a Signal peer address.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PeerAddress {
+    name: String,
+    device_id: u32,
+}
+
+impl PeerAddress {
+    pub fn new(name: impl Into<String>, device_id: u32) -> Result<Self> {
+        let name = name.into();
+        if name.is_empty() {
+            bail!("peer name must not be empty");
+        }
+        if device_id == 0 {
+            bail!("peer device ID must be non-zero");
+        }
+        Ok(Self { name, device_id })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+}
+
+impl fmt::Display for PeerAddress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}.{}", self.name, self.device_id)
+    }
 }
 
 /// Application-level message identity carried inside the authenticated Signal
@@ -451,6 +486,14 @@ impl SignalPreKeyBundle {
         ProtocolAddress::new(self.name.clone(), self.device_id)
     }
 
+    /// Returns a SafeChat-owned address view for new callers.
+    pub fn peer_address(&self) -> PeerAddress {
+        PeerAddress {
+            name: self.name.clone(),
+            device_id: self.device_id.into(),
+        }
+    }
+
     pub fn identity_key(&self) -> Result<IdentityKey> {
         Ok(*self.bundle.identity_key()?)
     }
@@ -725,6 +768,14 @@ impl SqliteSignalState {
 
     pub fn local_address(&self) -> &ProtocolAddress {
         &self.local_address
+    }
+
+    /// Returns a SafeChat-owned address view for new callers.
+    pub fn local_peer_address(&self) -> PeerAddress {
+        PeerAddress {
+            name: self.local_address.name().to_owned(),
+            device_id: self.local_address.device_id().into(),
+        }
     }
 
     pub async fn local_identity_fingerprint(&self) -> Result<String> {

@@ -1,5 +1,5 @@
 use safechat_core::profile_store::{
-    EncryptedHistoryStore, HistoryEntry, HistoryFile, HistoryStore, PROFILE_VERSION,
+    EncryptedHistoryStore, HistoryEntry, HistoryFile, HistoryStore,
 };
 
 fn temporary_root() -> std::path::PathBuf {
@@ -17,22 +17,17 @@ fn temporary_root() -> std::path::PathBuf {
 fn encrypted_history_store_public_contract_round_trips_and_pages() {
     let root = temporary_root();
     let mut store = EncryptedHistoryStore::new(&root, "test password").expect("create store");
-    let history = HistoryFile {
-        version: PROFILE_VERSION,
-        transport_cursor: 9,
-        entries: (0..3)
-            .map(|index| HistoryEntry {
-                timestamp: index,
-                sender: "peer".to_owned(),
-                text: format!("message {index}"),
-                message_id: format!("id-{index}"),
-                peer: "peer".to_owned(),
-                ciphertext: String::new(),
-                delivery_status: "received".to_owned(),
-                transport_recipient: String::new(),
+    let history = HistoryFile::new(
+        (0..3)
+            .map(|index| {
+                HistoryEntry::new(index, "peer", format!("message {index}"))
+                    .with_message_id(format!("id-{index}"))
+                    .with_peer("peer")
+                    .with_delivery_status("received")
             })
             .collect(),
-    };
+    )
+    .with_transport_cursor(9);
 
     store.save("peer", &history).expect("save history");
     let page = store.load_page("peer", None, 2).expect("load newest page");
@@ -48,4 +43,24 @@ fn encrypted_history_store_public_contract_round_trips_and_pages() {
     assert_eq!(non_empty_page.entries.len(), 1);
 
     std::fs::remove_dir_all(root).expect("clean up test store");
+}
+
+#[test]
+fn public_history_builders_preserve_optional_metadata_defaults() {
+    let entry = HistoryEntry::new(42, "alice", "hello")
+        .with_peer("peer-address")
+        .with_delivery_status("sent");
+    assert_eq!(entry.timestamp, 42);
+    assert_eq!(entry.sender, "alice");
+    assert_eq!(entry.text, "hello");
+    assert_eq!(entry.peer, "peer-address");
+    assert_eq!(entry.delivery_status, "sent");
+    assert!(entry.message_id.is_empty());
+    assert!(entry.ciphertext.is_empty());
+
+    let config = safechat_core::profile_store::RelayConfig::new("https://relay", "secret")
+        .with_insecure_http(true);
+    assert_eq!(config.base_url, "https://relay");
+    assert_eq!(config.enrollment_secret, "secret");
+    assert!(config.allow_insecure_http);
 }

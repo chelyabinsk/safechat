@@ -1,4 +1,14 @@
-use safechat_core::signal::{MessageId, SafeChatMessage, SignalEnvelope};
+use safechat_core::signal::{MessageId, PeerAddress, SafeChatMessage, SignalEnvelope};
+
+#[test]
+fn public_peer_address_is_owned_by_safechat() {
+    let address = PeerAddress::new("alice", 2).expect("valid peer address");
+    assert_eq!(address.name(), "alice");
+    assert_eq!(address.device_id(), 2);
+    assert_eq!(address.to_string(), "alice.2");
+    assert!(PeerAddress::new("", 2).is_err());
+    assert!(PeerAddress::new("alice", 0).is_err());
+}
 
 #[test]
 fn public_signal_envelope_round_trips_without_private_state() {

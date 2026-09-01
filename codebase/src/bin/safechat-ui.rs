@@ -6,9 +6,9 @@ use dialoguer::{Confirm, Input, Password, Select};
 use directories::ProjectDirs;
 use safechat::chat_service::{ChatEvent, ChatService};
 use safechat::profile_store::{
-    EncryptedHistoryStore, HistoryEntry, HistoryFile, PROFILE_VERSION, RelayConfig, load_history,
-    load_relay_config, load_relay_peer_ids, load_relay_token, save_history, save_relay_config,
-    save_relay_peer_ids, save_relay_token,
+    EncryptedHistoryStore, HistoryEntry, HistoryFile, RelayConfig, load_history, load_relay_config,
+    load_relay_peer_ids, load_relay_token, save_history, save_relay_config, save_relay_peer_ids,
+    save_relay_token,
 };
 use safechat::relay_client::{RelayClient, RelayClientConfig};
 use safechat::relay_transport::RelayTransport;
@@ -87,11 +87,8 @@ fn main() -> Result<()> {
         save_relay_config(
             &paths.relay_config,
             &password,
-            &RelayConfig {
-                base_url: options.base_url.clone(),
-                allow_insecure_http: options.allow_insecure_http,
-                enrollment_secret: options.enrollment_secret.clone(),
-            },
+            &RelayConfig::new(&options.base_url, &options.enrollment_secret)
+                .with_insecure_http(options.allow_insecure_http),
         )?;
     }
     let relay = setup_relay(&paths, &password, &mut state, relay_options.as_ref())?;
@@ -112,9 +109,8 @@ fn main() -> Result<()> {
             if path.exists() {
                 load_history(&path, &password)
             } else if let Some(legacy) = &legacy_history {
-                Ok(HistoryFile {
-                    version: PROFILE_VERSION,
-                    entries: legacy
+                Ok(HistoryFile::new(
+                    legacy
                         .entries
                         .iter()
                         .filter(|entry| {
@@ -124,14 +120,9 @@ fn main() -> Result<()> {
                         })
                         .cloned()
                         .collect(),
-                    transport_cursor: 0,
-                })
+                ))
             } else {
-                Ok(HistoryFile {
-                    version: PROFILE_VERSION,
-                    entries: Vec::new(),
-                    transport_cursor: 0,
-                })
+                Ok(HistoryFile::empty())
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -502,11 +493,7 @@ fn review_contact_requests(
             *current = index;
         } else {
             peers.push(bundle);
-            histories.push(HistoryFile {
-                version: PROFILE_VERSION,
-                entries: Vec::new(),
-                transport_cursor: 0,
-            });
+            histories.push(HistoryFile::empty());
             *current = peers.len() - 1;
         }
         println!("Contact accepted. Private lobby is ready.");
@@ -556,11 +543,7 @@ fn integrate_accepted_contact(
         *current = index;
     } else {
         peers.push(bundle);
-        histories.push(HistoryFile {
-            version: PROFILE_VERSION,
-            entries: Vec::new(),
-            transport_cursor: 0,
-        });
+        histories.push(HistoryFile::empty());
         *current = peers.len() - 1;
     }
     println!("Private lobby is ready.");
@@ -807,11 +790,8 @@ fn chat_loop(
                     save_relay_config(
                         &paths.relay_config,
                         password,
-                        &RelayConfig {
-                            base_url: options.base_url.clone(),
-                            allow_insecure_http: options.allow_insecure_http,
-                            enrollment_secret: options.enrollment_secret.clone(),
-                        },
+                        &RelayConfig::new(&options.base_url, &options.enrollment_secret)
+                            .with_insecure_http(options.allow_insecure_http),
                     )?;
                     println!("Transport changed to Relay.");
                 }
@@ -822,11 +802,8 @@ fn chat_loop(
                 save_relay_config(
                     &paths.relay_config,
                     password,
-                    &RelayConfig {
-                        base_url: options.base_url.clone(),
-                        allow_insecure_http: options.allow_insecure_http,
-                        enrollment_secret: options.enrollment_secret.clone(),
-                    },
+                    &RelayConfig::new(&options.base_url, &options.enrollment_secret)
+                        .with_insecure_http(options.allow_insecure_http),
                 )?;
                 println!("Relay transport settings updated.");
             }
@@ -953,11 +930,7 @@ fn chat_loop(
                     histories[index].clone()
                 } else {
                     peers.push(bundle.clone());
-                    histories.push(HistoryFile {
-                        version: PROFILE_VERSION,
-                        entries: Vec::new(),
-                        transport_cursor: 0,
-                    });
+                    histories.push(HistoryFile::empty());
                     histories.last().cloned().unwrap()
                 };
                 let index = peers
@@ -1034,11 +1007,7 @@ fn chat_loop(
                         let history = if history_path.exists() {
                             load_history(&history_path, password)?
                         } else {
-                            HistoryFile {
-                                version: PROFILE_VERSION,
-                                entries: Vec::new(),
-                                transport_cursor: 0,
-                            }
+                            HistoryFile::empty()
                         };
                         peers.push(peer);
                         histories.push(history);
@@ -1064,18 +1033,16 @@ fn chat_loop(
                     recipient
                 };
                 let bundle = futures_executor::block_on(state.export_bundle())?;
-                let request = ContactRequest {
-                    request_id: format!(
+                let request = ContactRequest::new(
+                    format!(
                         "cr-{}",
                         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
                     ),
-                    sender_id: runtime.client_id().to_owned(),
-                    sender_name: bundle.address().name().to_owned(),
-                    sender_fingerprint: futures_executor::block_on(
-                        state.local_identity_fingerprint(),
-                    )?,
-                    bundle: bundle.encode()?,
-                };
+                    runtime.client_id().to_owned(),
+                    bundle.address().name().to_owned(),
+                    futures_executor::block_on(state.local_identity_fingerprint())?,
+                    bundle.encode()?,
+                );
                 runtime.request_contact(&recipient, &request)?;
                 println!("Contact request sent to {recipient}.");
             }
@@ -1264,16 +1231,12 @@ fn send_envelope(
 ) -> Result<()> {
     let ciphertext = TextTransport.encode(envelope).trim().to_owned();
     let timestamp = now();
-    history.entries.push(HistoryEntry {
-        timestamp,
-        sender: "you".to_owned(),
-        text: String::from_utf8_lossy(plaintext).into_owned(),
-        message_id: message_id.encode(),
-        peer: peer.address().to_string(),
-        ciphertext: ciphertext.clone(),
-        delivery_status: String::new(),
-        transport_recipient: String::new(),
-    });
+    history.entries.push(
+        HistoryEntry::new(timestamp, "you", String::from_utf8_lossy(plaintext))
+            .with_message_id(message_id.encode())
+            .with_peer(peer.address().to_string())
+            .with_ciphertext(ciphertext.clone()),
+    );
     save_history(&paths.lobby_history(peer), password, history)?;
     println!("Copy and send this ciphertext:");
     println!("{ciphertext}");
@@ -1619,16 +1582,13 @@ fn receive_envelope(
     let text =
         String::from_utf8(message.plaintext).context("decrypted message is not UTF-8 text")?;
     let timestamp = now();
-    history.entries.push(HistoryEntry {
-        timestamp,
-        sender: peer.name.clone(),
-        text: text.clone(),
-        message_id,
-        peer: peer.address().to_string(),
-        ciphertext: TextTransport.encode(envelope).trim().to_owned(),
-        delivery_status: "received".to_owned(),
-        transport_recipient: String::new(),
-    });
+    history.entries.push(
+        HistoryEntry::new(timestamp, peer.name.clone(), text.clone())
+            .with_message_id(message_id)
+            .with_peer(peer.address().to_string())
+            .with_ciphertext(TextTransport.encode(envelope).trim())
+            .with_delivery_status("received"),
+    );
     save_history(&paths.lobby_history(peer), password, history)?;
     println!("[{}] {}: {}", format_timestamp(timestamp), peer.name, text);
     Ok(())
@@ -1702,20 +1662,11 @@ mod tests {
     #[test]
     fn encrypted_history_round_trip_requires_password() {
         let path = std::env::temp_dir().join(format!("safechat-ui-history-{}.age", unique_id()));
-        let history = HistoryFile {
-            version: PROFILE_VERSION,
-            entries: vec![HistoryEntry {
-                timestamp: 1,
-                sender: "alice".to_owned(),
-                text: "private message".to_owned(),
-                message_id: "".to_owned(),
-                peer: "alice".to_owned(),
-                ciphertext: "test".to_owned(),
-                delivery_status: String::new(),
-                transport_recipient: String::new(),
-            }],
-            transport_cursor: 0,
-        };
+        let history = HistoryFile::new(vec![
+            HistoryEntry::new(1, "alice", "private message")
+                .with_peer("alice")
+                .with_ciphertext("test"),
+        ]);
         save_history(&path, "correct password", &history).unwrap();
         assert_eq!(
             load_history(&path, "correct password")

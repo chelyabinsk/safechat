@@ -361,13 +361,13 @@ impl RelayClient {
         responses
             .into_iter()
             .map(|response| {
-                Ok(ContactRequest {
-                    request_id: response.request_id,
-                    sender_id: response.sender_id,
-                    sender_name: response.sender_name,
-                    sender_fingerprint: response.sender_fingerprint,
-                    bundle: URL_SAFE_NO_PAD.decode(response.bundle)?,
-                })
+                Ok(ContactRequest::new(
+                    response.request_id,
+                    response.sender_id,
+                    response.sender_name,
+                    response.sender_fingerprint,
+                    URL_SAFE_NO_PAD.decode(response.bundle)?,
+                ))
             })
             .collect()
     }
@@ -382,13 +382,13 @@ impl RelayClient {
             .into_iter()
             .filter(|response| response.status == "accepted")
             .map(|response| {
-                Ok(ContactRequest {
-                    request_id: response.request_id,
-                    sender_id: response.sender_id,
-                    sender_name: response.sender_name,
-                    sender_fingerprint: response.sender_fingerprint,
-                    bundle: URL_SAFE_NO_PAD.decode(response.bundle)?,
-                })
+                Ok(ContactRequest::new(
+                    response.request_id,
+                    response.sender_id,
+                    response.sender_name,
+                    response.sender_fingerprint,
+                    URL_SAFE_NO_PAD.decode(response.bundle)?,
+                ))
             })
             .collect()
     }
@@ -399,13 +399,13 @@ impl RelayClient {
             &format!("/v1/contacts/requests/{request_id}/accept"),
             serde_json::Value::Null,
         )?;
-        Ok(ContactRequest {
-            request_id: response.request_id,
-            sender_id: response.sender_id,
-            sender_name: response.sender_name,
-            sender_fingerprint: response.sender_fingerprint,
-            bundle: URL_SAFE_NO_PAD.decode(response.bundle)?,
-        })
+        Ok(ContactRequest::new(
+            response.request_id,
+            response.sender_id,
+            response.sender_name,
+            response.sender_fingerprint,
+            URL_SAFE_NO_PAD.decode(response.bundle)?,
+        ))
     }
 
     pub fn reject_contact(&self, request_id: &str) -> Result<()> {
@@ -546,15 +546,15 @@ impl MessageTransport for RelayClient {
         self.receive_messages(cursor)?
             .into_iter()
             .map(|message| {
-                Ok(TransportMessage {
-                    transport_id: message.server_id.to_string(),
-                    sender: message.sender,
-                    sender_address: message.sender_address,
-                    message_id: message.message_id,
-                    ciphertext: message.ciphertext,
-                    accepted_at: message.accepted_at,
-                    expires_at: message.expires_at,
-                })
+                Ok(TransportMessage::new(
+                    message.server_id.to_string(),
+                    message.sender,
+                    message.sender_address,
+                    message.message_id,
+                    message.ciphertext,
+                    message.accepted_at,
+                    message.expires_at,
+                ))
             })
             .collect()
     }

@@ -11,8 +11,8 @@ pub mod transport;
 /// Stable Signal-facing contract for application and transport crates.
 pub mod signal {
     pub use super::signal_adapter::{
-        IdentityRecoveryRecord, MessageId, SafeChatMessage, SignalEnvelope, SignalPreKeyBundle,
-        SqliteSignalState, identity_fingerprint, upstream_revision,
+        IdentityRecoveryRecord, MessageId, PeerAddress, SafeChatMessage, SignalEnvelope,
+        SignalPreKeyBundle, SqliteSignalState, identity_fingerprint, upstream_revision,
     };
 }
 
@@ -23,8 +23,8 @@ pub mod diagnostics {
 
 pub use profile_store::{HistoryEntry, HistoryFile, HistoryPage, HistoryStore, PROFILE_VERSION};
 pub use signal::{
-    IdentityRecoveryRecord, MessageId, SafeChatMessage, SignalEnvelope, SignalPreKeyBundle,
-    SqliteSignalState, identity_fingerprint,
+    IdentityRecoveryRecord, MessageId, PeerAddress, SafeChatMessage, SignalEnvelope,
+    SignalPreKeyBundle, SqliteSignalState, identity_fingerprint,
 };
 pub use transport::{
     BundleTransport, ContactRequest, ContactTransport, DeliveryStatus, MessageTransport,

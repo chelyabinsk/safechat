@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 pub const PROFILE_VERSION: u32 = 1;
 
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoryFile {
     pub version: u32,
@@ -31,6 +32,19 @@ impl HistoryFile {
             entries: Vec::new(),
             transport_cursor: 0,
         }
+    }
+
+    /// Creates a history containing the supplied entries.
+    pub fn new(entries: Vec<HistoryEntry>) -> Self {
+        Self {
+            entries,
+            ..Self::empty()
+        }
+    }
+
+    pub fn with_transport_cursor(mut self, cursor: i64) -> Self {
+        self.transport_cursor = cursor;
+        self
     }
 
     /// Returns a page ending immediately before `before`.
@@ -51,6 +65,7 @@ impl HistoryFile {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub timestamp: u64,
@@ -68,6 +83,48 @@ pub struct HistoryEntry {
     pub transport_recipient: String,
 }
 
+impl HistoryEntry {
+    /// Creates a user-visible history entry with optional transport metadata
+    /// left at its safe defaults.
+    pub fn new(timestamp: u64, sender: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            timestamp,
+            sender: sender.into(),
+            text: text.into(),
+            message_id: String::new(),
+            peer: String::new(),
+            ciphertext: String::new(),
+            delivery_status: String::new(),
+            transport_recipient: String::new(),
+        }
+    }
+
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = message_id.into();
+        self
+    }
+
+    pub fn with_peer(mut self, peer: impl Into<String>) -> Self {
+        self.peer = peer.into();
+        self
+    }
+
+    pub fn with_ciphertext(mut self, ciphertext: impl Into<String>) -> Self {
+        self.ciphertext = ciphertext.into();
+        self
+    }
+
+    pub fn with_delivery_status(mut self, status: impl Into<String>) -> Self {
+        self.delivery_status = status.into();
+        self
+    }
+
+    pub fn with_transport_recipient(mut self, recipient: impl Into<String>) -> Self {
+        self.transport_recipient = recipient.into();
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryPage {
     pub entries: Vec<HistoryEntry>,
@@ -76,6 +133,7 @@ pub struct HistoryPage {
     pub transport_cursor: i64,
 }
 
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayConfig {
     pub base_url: String,
@@ -83,6 +141,21 @@ pub struct RelayConfig {
     pub allow_insecure_http: bool,
     #[serde(default)]
     pub enrollment_secret: String,
+}
+
+impl RelayConfig {
+    pub fn new(base_url: impl Into<String>, enrollment_secret: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            allow_insecure_http: false,
+            enrollment_secret: enrollment_secret.into(),
+        }
+    }
+
+    pub fn with_insecure_http(mut self, allowed: bool) -> Self {
+        self.allow_insecure_http = allowed;
+        self
+    }
 }
 
 /// Persistence port consumed by the application chat service.

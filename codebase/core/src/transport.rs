@@ -8,6 +8,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 /// `transport_id` is opaque to the messaging layer. HTTP relays use a server
 /// row ID, while a future P2P transport can use a connection-local or
 /// protocol-defined identifier.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransportMessage {
     pub transport_id: String,
@@ -19,6 +20,28 @@ pub struct TransportMessage {
     pub expires_at: Option<u64>,
 }
 
+impl TransportMessage {
+    pub fn new(
+        transport_id: impl Into<String>,
+        sender: impl Into<String>,
+        sender_address: Option<String>,
+        message_id: impl Into<String>,
+        ciphertext: Vec<u8>,
+        accepted_at: u64,
+        expires_at: Option<u64>,
+    ) -> Self {
+        Self {
+            transport_id: transport_id.into(),
+            sender: sender.into(),
+            sender_address,
+            message_id: message_id.into(),
+            ciphertext,
+            accepted_at,
+            expires_at,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeliveryStatus {
     Sent,
@@ -26,6 +49,7 @@ pub enum DeliveryStatus {
 }
 
 /// A carrier-neutral request to establish a private conversation.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactRequest {
     pub request_id: String,
@@ -33,6 +57,24 @@ pub struct ContactRequest {
     pub sender_name: String,
     pub sender_fingerprint: String,
     pub bundle: Vec<u8>,
+}
+
+impl ContactRequest {
+    pub fn new(
+        request_id: impl Into<String>,
+        sender_id: impl Into<String>,
+        sender_name: impl Into<String>,
+        sender_fingerprint: impl Into<String>,
+        bundle: Vec<u8>,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            sender_id: sender_id.into(),
+            sender_name: sender_name.into(),
+            sender_fingerprint: sender_fingerprint.into(),
+            bundle,
+        }
+    }
 }
 
 /// Boundary for contact discovery and approval. Implementations own only

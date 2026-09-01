@@ -148,7 +148,7 @@ impl IntoResponse for ApiError {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::AllowlistAdd {
             database,
@@ -344,6 +344,22 @@ fn allowlist_add_remote(
 
 fn router(state: AppState) -> Router {
     router::build(state)
+}
+
+/// Builds a relay application backed by `database`.
+///
+/// This library entry point makes the HTTP contract testable by external
+/// consumers without exposing the relay's database state or handlers.
+pub fn build_router(
+    database: impl AsRef<std::path::Path>,
+    admin_token: Option<String>,
+) -> anyhow::Result<Router> {
+    let connection = open_database(database.as_ref())?;
+    initialize_schema(&connection)?;
+    Ok(router(AppState {
+        db: Arc::new(Mutex::new(connection)),
+        admin_token,
+    }))
 }
 
 async fn health() -> impl IntoResponse {
