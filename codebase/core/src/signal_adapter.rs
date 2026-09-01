@@ -5,6 +5,7 @@
 //! gives us one place to enforce our storage, transport, and wire-format
 //! policies.
 
+use crate::signal_types::PeerAddress;
 use anyhow::{Context, Result, bail};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -17,7 +18,6 @@ use signal_protocol::{
     process_prekey_bundle,
 };
 use signal_rand::{CryptoRng, Rng, TryRngCore};
-use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -143,40 +143,6 @@ impl IdentityRecoveryRecord {
 pub struct SignalEnvelope {
     pub message_type: u8,
     pub ciphertext: Vec<u8>,
-}
-
-/// Stable SafeChat representation of a Signal peer address.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct PeerAddress {
-    name: String,
-    device_id: u32,
-}
-
-impl PeerAddress {
-    pub fn new(name: impl Into<String>, device_id: u32) -> Result<Self> {
-        let name = name.into();
-        if name.is_empty() {
-            bail!("peer name must not be empty");
-        }
-        if device_id == 0 {
-            bail!("peer device ID must be non-zero");
-        }
-        Ok(Self { name, device_id })
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn device_id(&self) -> u32 {
-        self.device_id
-    }
-}
-
-impl fmt::Display for PeerAddress {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}.{}", self.name, self.device_id)
-    }
 }
 
 /// Application-level message identity carried inside the authenticated Signal
@@ -488,10 +454,8 @@ impl SignalPreKeyBundle {
 
     /// Returns a SafeChat-owned address view for new callers.
     pub fn peer_address(&self) -> PeerAddress {
-        PeerAddress {
-            name: self.name.clone(),
-            device_id: self.device_id.into(),
-        }
+        PeerAddress::new(self.name.clone(), self.device_id.into())
+            .expect("decoded Signal bundle has a valid peer address")
     }
 
     pub fn identity_key(&self) -> Result<IdentityKey> {
@@ -772,10 +736,11 @@ impl SqliteSignalState {
 
     /// Returns a SafeChat-owned address view for new callers.
     pub fn local_peer_address(&self) -> PeerAddress {
-        PeerAddress {
-            name: self.local_address.name().to_owned(),
-            device_id: self.local_address.device_id().into(),
-        }
+        PeerAddress::new(
+            self.local_address.name().to_owned(),
+            self.local_address.device_id().into(),
+        )
+        .expect("local Signal state has a valid peer address")
     }
 
     pub async fn local_identity_fingerprint(&self) -> Result<String> {
@@ -1494,7 +1459,7 @@ fn reject_plaintext_database(path: &Path) -> Result<()> {
 
 /// Run a real libsignal X3DH/Double-Ratchet exchange between two SQLite-backed
 /// clients, including a restart between messages.
-pub fn run_signal_demo() -> Result<Vec<u8>> {
+pub(crate) fn run_signal_demo_impl() -> Result<Vec<u8>> {
     futures_executor::block_on(async {
         let mut rng = signal_rand::rngs::OsRng.unwrap_err();
         let device_id = DeviceId::new(1).map_err(|error| anyhow::anyhow!(error.to_string()))?;
