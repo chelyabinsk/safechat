@@ -19,8 +19,9 @@ pub mod profile_store {
 pub mod signal_adapter {
     pub use safechat_core::diagnostics::run_signal_demo;
     pub use safechat_core::signal::{
-        IdentityRecoveryRecord, MessageId, PeerAddress, SafeChatMessage, SignalEnvelope,
-        SignalPreKeyBundle, SqliteSignalState, identity_fingerprint, upstream_revision,
+        IdentityPublicKey, IdentityRecoveryRecord, MessageId, PeerAddress, SafeChatMessage,
+        SignalEnvelope, SignalPreKeyBundle, SqliteSignalState, identity_fingerprint,
+        upstream_revision,
     };
 }
 pub mod transport {

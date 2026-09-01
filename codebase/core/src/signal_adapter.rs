@@ -5,7 +5,7 @@
 //! gives us one place to enforce our storage, transport, and wire-format
 //! policies.
 
-use crate::signal_types::PeerAddress;
+use crate::signal_types::{IdentityPublicKey, PeerAddress};
 use anyhow::{Context, Result, bail};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -460,6 +460,11 @@ impl SignalPreKeyBundle {
 
     pub fn identity_key(&self) -> Result<IdentityKey> {
         Ok(*self.bundle.identity_key()?)
+    }
+
+    /// Returns a validated SafeChat-owned identity key representation.
+    pub fn identity_public_key(&self) -> Result<IdentityPublicKey> {
+        IdentityPublicKey::from_bytes(self.identity_key()?.serialize().to_vec())
     }
 }
 

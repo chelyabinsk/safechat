@@ -58,3 +58,19 @@ async fn public_router_exposes_health_and_capabilities_contracts() {
 
     std::fs::remove_file(database).expect("remove temporary database");
 }
+
+#[tokio::test]
+async fn public_router_rejects_unknown_routes_without_private_state_access() {
+    let database = temporary_database();
+    let app = build_router(&database, None).expect("build relay router");
+    let response = app
+        .oneshot(
+            Request::get("/v1/not-a-route")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("unknown route response");
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    std::fs::remove_file(database).expect("remove temporary database");
+}

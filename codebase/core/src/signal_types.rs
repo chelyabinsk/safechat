@@ -36,3 +36,23 @@ impl fmt::Display for PeerAddress {
         write!(formatter, "{}.{}", self.name, self.device_id)
     }
 }
+
+/// Validated serialized public identity key owned by SafeChat.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityPublicKey(Vec<u8>);
+
+impl IdentityPublicKey {
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        signal_protocol::IdentityKey::try_from(bytes.as_slice())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn fingerprint(&self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+}

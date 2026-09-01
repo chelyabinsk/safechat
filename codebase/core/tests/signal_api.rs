@@ -1,4 +1,6 @@
-use safechat_core::signal::{MessageId, PeerAddress, SafeChatMessage, SignalEnvelope};
+use safechat_core::signal::{
+    IdentityPublicKey, MessageId, PeerAddress, SafeChatMessage, SignalEnvelope,
+};
 
 #[test]
 fn public_peer_address_is_owned_by_safechat() {
@@ -8,6 +10,12 @@ fn public_peer_address_is_owned_by_safechat() {
     assert_eq!(address.to_string(), "alice.2");
     assert!(PeerAddress::new("", 2).is_err());
     assert!(PeerAddress::new("alice", 0).is_err());
+}
+
+#[test]
+fn public_identity_key_view_validates_and_fingerprints_bytes() {
+    let invalid = IdentityPublicKey::from_bytes(vec![1, 2, 3]);
+    assert!(invalid.is_err());
 }
 
 #[test]

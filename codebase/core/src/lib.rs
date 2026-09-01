@@ -16,7 +16,7 @@ pub mod signal {
         IdentityRecoveryRecord, MessageId, SafeChatMessage, SignalEnvelope, SignalPreKeyBundle,
         SqliteSignalState, identity_fingerprint, upstream_revision,
     };
-    pub use super::signal_types::PeerAddress;
+    pub use super::signal_types::{IdentityPublicKey, PeerAddress};
 }
 
 /// Non-production diagnostics kept separate from the messaging contract.
@@ -26,8 +26,8 @@ pub mod diagnostics {
 
 pub use profile_store::{HistoryEntry, HistoryFile, HistoryPage, HistoryStore, PROFILE_VERSION};
 pub use signal::{
-    IdentityRecoveryRecord, MessageId, PeerAddress, SafeChatMessage, SignalEnvelope,
-    SignalPreKeyBundle, SqliteSignalState, identity_fingerprint,
+    IdentityPublicKey, IdentityRecoveryRecord, MessageId, PeerAddress, SafeChatMessage,
+    SignalEnvelope, SignalPreKeyBundle, SqliteSignalState, identity_fingerprint,
 };
 pub use transport::{
     BundleTransport, ContactRequest, ContactTransport, DeliveryStatus, MessageTransport,
