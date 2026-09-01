@@ -33,6 +33,17 @@ pub trait ProfileStore: Send + Sync {
 pub trait HistoryStore: Send + Sync {
     fn load(&self, profile: &str, password: &str, peer: &str) -> Result<HistoryFile>;
     fn save(&self, profile: &str, password: &str, peer: &str, history: &HistoryFile) -> Result<()>;
+
+    fn load_page(
+        &self,
+        profile: &str,
+        password: &str,
+        peer: &str,
+        before: Option<usize>,
+        page_size: usize,
+    ) -> Result<safechat_core::profile_store::HistoryPage> {
+        Ok(self.load(profile, password, peer)?.page(before, page_size))
+    }
 }
 
 pub trait Clipboard: Send + Sync {

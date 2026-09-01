@@ -23,7 +23,35 @@ pub struct HistoryFile {
     pub transport_cursor: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl HistoryFile {
+    /// Creates an empty history using the current on-disk format version.
+    pub fn empty() -> Self {
+        Self {
+            version: PROFILE_VERSION,
+            entries: Vec::new(),
+            transport_cursor: 0,
+        }
+    }
+
+    /// Returns a page ending immediately before `before`.
+    ///
+    /// `before == None` selects the newest page. This is a storage-neutral
+    /// contract: backends that can seek encrypted records may override
+    /// [`HistoryStore::load_page`] without changing application code.
+    pub fn page(&self, before: Option<usize>, page_size: usize) -> HistoryPage {
+        let page_size = page_size.max(1);
+        let end = before.unwrap_or(self.entries.len()).min(self.entries.len());
+        let start = end.saturating_sub(page_size);
+        HistoryPage {
+            entries: self.entries[start..end].to_vec(),
+            cursor: start,
+            has_more: start > 0,
+            transport_cursor: self.transport_cursor,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub timestamp: u64,
     pub sender: String,
@@ -40,6 +68,14 @@ pub struct HistoryEntry {
     pub transport_recipient: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryPage {
+    pub entries: Vec<HistoryEntry>,
+    pub cursor: usize,
+    pub has_more: bool,
+    pub transport_cursor: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayConfig {
     pub base_url: String,
@@ -53,6 +89,17 @@ pub struct RelayConfig {
 pub trait HistoryStore {
     fn load(&mut self, conversation: &str) -> Result<HistoryFile>;
     fn save(&mut self, conversation: &str, history: &HistoryFile) -> Result<()>;
+
+    /// Loads one page of history. The default preserves compatibility with
+    /// existing stores; seekable stores should override this method.
+    fn load_page(
+        &mut self,
+        conversation: &str,
+        before: Option<usize>,
+        page_size: usize,
+    ) -> Result<HistoryPage> {
+        Ok(self.load(conversation)?.page(before, page_size))
+    }
 }
 
 /// Encrypted age-backed history adapter for the desktop profile.
@@ -102,11 +149,7 @@ impl HistoryStore for EncryptedHistoryStore {
 
 pub fn load_history(path: &Path, password: &str) -> Result<HistoryFile> {
     if !path.exists() {
-        return Ok(HistoryFile {
-            version: PROFILE_VERSION,
-            entries: Vec::new(),
-            transport_cursor: 0,
-        });
+        return Ok(HistoryFile::empty());
     }
     let mut plaintext = decrypt_history_file(path, password)?;
     let history: HistoryFile = serde_json::from_slice(&plaintext)?;

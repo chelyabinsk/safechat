@@ -4,8 +4,8 @@ use super::{ConversationMessage, ProfileSession};
 use anyhow::{Context, Result};
 use safechat_application::chat_service::{ChatEvent, ChatService};
 use safechat_core::profile_store::{
-    EncryptedHistoryStore, HistoryEntry, HistoryFile, HistoryStore, load_relay_config,
-    load_relay_peer_ids, load_relay_token,
+    EncryptedHistoryStore, HistoryEntry, HistoryFile, HistoryPage as CoreHistoryPage, HistoryStore,
+    load_relay_config, load_relay_peer_ids, load_relay_token,
 };
 use safechat_core::signal_adapter::SqliteSignalState;
 use safechat_core::transport::TextTransport;
@@ -22,6 +22,30 @@ pub(super) struct HistoryPage {
     pub messages: Vec<ConversationMessage>,
     pub cursor: usize,
     pub has_more: bool,
+}
+
+fn render_core_page(page: CoreHistoryPage) -> HistoryPage {
+    let messages = page
+        .entries
+        .iter()
+        .map(|entry| ConversationMessage {
+            sender: if entry.sender == "you" {
+                "You".to_owned()
+            } else {
+                entry.sender.clone()
+            },
+            text: entry.text.clone(),
+            timestamp: entry.timestamp,
+            outgoing: entry.sender == "you",
+            status: entry.delivery_status.clone(),
+            ciphertext: entry.ciphertext.clone(),
+        })
+        .collect();
+    HistoryPage {
+        messages,
+        cursor: page.cursor,
+        has_more: page.has_more,
+    }
 }
 
 pub(super) fn render_history_page(history: &HistoryFile, before: Option<usize>) -> HistoryPage {
@@ -209,12 +233,14 @@ pub(super) fn load_chat_history(
     history_store: &dyn HistoryStorePort,
 ) -> Result<HistoryPage> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
-    let history = history_store.load(
+    let page = history_store.load_page(
         &session.profile,
         &session.password,
         &peer.address().to_string(),
+        None,
+        HISTORY_PAGE_SIZE,
     )?;
-    Ok(render_history_page(&history, None))
+    Ok(render_core_page(page))
 }
 
 pub(super) fn load_older_chat_history(
@@ -224,12 +250,14 @@ pub(super) fn load_older_chat_history(
     history_store: &dyn HistoryStorePort,
 ) -> Result<HistoryPage> {
     let peer = peer_bundle_from_encoded(encoded_peer)?;
-    let history = history_store.load(
+    let page = history_store.load_page(
         &session.profile,
         &session.password,
         &peer.address().to_string(),
+        Some(before),
+        HISTORY_PAGE_SIZE,
     )?;
-    Ok(render_history_page(&history, Some(before)))
+    Ok(render_core_page(page))
 }
 
 pub(super) fn perform_chat_action(
