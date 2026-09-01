@@ -1,10 +1,4 @@
-use axum::{
-    Router,
-    extract::DefaultBodyLimit,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{get, post, put},
-};
+use axum::{Router, http::StatusCode, response::IntoResponse};
 use axum_server::tls_rustls::RustlsConfig;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand};
@@ -43,27 +37,15 @@ mod database;
 mod enrollment;
 mod events;
 mod messages;
+mod router;
 mod validation;
-use admin::{AdminAllowlistRequest, allowlist as admin_allowlist};
+use admin::AdminAllowlistRequest;
 use auth::*;
-use bundles::{
-    fetch as fetch_bundle, fetch_by_address as fetch_bundle_by_address, publish as publish_bundle,
-};
-use contacts::{
-    accept as accept_contact_request, create as create_contact_request,
-    list as list_contact_requests, reject as reject_contact_request,
-};
 use database::{open as open_database, *};
 #[cfg(test)]
 use enrollment::{ChallengeResponse, EnrollmentResponse, RegisterResponse};
-use enrollment::{challenge, enrollment_request, register};
-use events::route as events_route;
 #[cfg(test)]
 use messages::{MessageResponse, MessageStatusResponse};
-use messages::{
-    acknowledge as ack_message, receive as receive_messages, send as send_message,
-    status as message_status,
-};
 use validation::*;
 
 #[derive(Parser)]
@@ -151,13 +133,13 @@ enum Command {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     db: Arc<Mutex<Connection>>,
     admin_token: Option<String>,
 }
 
 #[derive(Debug)]
-struct ApiError(StatusCode, String);
+pub(crate) struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
@@ -361,39 +343,7 @@ fn allowlist_add_remote(
 }
 
 fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/v1/health", get(health))
-        .route("/v1/capabilities", get(capabilities))
-        .route("/v1/admin/allowlist", post(admin_allowlist))
-        .route("/v1/devices/challenge", post(challenge))
-        .route("/v1/devices/enrollment-requests", post(enrollment_request))
-        .route("/v1/devices/register", post(register))
-        .route(
-            "/v1/devices/{device}/bundle",
-            put(publish_bundle).get(fetch_bundle),
-        )
-        .route(
-            "/v1/devices/by-address/{address}/bundle",
-            get(fetch_bundle_by_address),
-        )
-        .route("/v1/messages", post(send_message).get(receive_messages))
-        .route(
-            "/v1/contacts/requests",
-            post(create_contact_request).get(list_contact_requests),
-        )
-        .route(
-            "/v1/contacts/requests/{request_id}/accept",
-            post(accept_contact_request),
-        )
-        .route(
-            "/v1/contacts/requests/{request_id}/reject",
-            post(reject_contact_request),
-        )
-        .route("/v1/messages/status", get(message_status))
-        .route("/v1/messages/{server_id}/ack", post(ack_message))
-        .route("/v1/events", get(events_route))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(state)
+    router::build(state)
 }
 
 async fn health() -> impl IntoResponse {
@@ -876,12 +826,12 @@ mod tests {
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let message_body = relay_binary::encode_submit(&relay_binary::Submit {
-            recipient: client_id.into(),
-            message_id: "message-1".into(),
-            expires_at: None,
-            ciphertext: b"opaque-ciphertext".to_vec(),
-        })
+        let message_body = relay_binary::encode_submit(&relay_binary::Submit::new(
+            client_id,
+            "message-1",
+            None,
+            b"opaque-ciphertext".to_vec(),
+        ))
         .unwrap();
         let replay_body = message_body.clone();
         let (headers, nonce) = signed_headers(

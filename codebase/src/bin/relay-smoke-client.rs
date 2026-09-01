@@ -132,12 +132,12 @@ fn run(
     println!("{}: registered", client_id);
     if send {
         let message_id = format!("smoke-{}-{}", client_id, now());
-        let body = relay_binary::encode_submit(&relay_binary::Submit {
-            recipient: recipient.to_owned(),
-            message_id: message_id.clone(),
-            expires_at: None,
-            ciphertext: b"encrypted-smoke-payload".to_vec(),
-        })?;
+        let body = relay_binary::encode_submit(&relay_binary::Submit::new(
+            recipient,
+            &message_id,
+            None,
+            b"encrypted-smoke-payload".to_vec(),
+        ))?;
         let h = headers(
             &pair,
             &registration.access_token,

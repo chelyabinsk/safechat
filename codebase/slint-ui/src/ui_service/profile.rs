@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use directories::ProjectDirs;
-use safechat_core::signal_adapter::{SignalPreKeyBundle, SqliteSignalState};
+use safechat_core::signal::{SignalPreKeyBundle, SqliteSignalState, identity_fingerprint};
 use safechat_core::transport::BundleTransport;
 use std::path::PathBuf;
 
@@ -145,8 +145,7 @@ pub(super) fn verify_add_contact(
 ) -> Result<(String, String)> {
     let database = profile_database(profile)?;
     let bundle = peer_bundle_from_encoded(encoded_bundle)?;
-    let actual_fingerprint =
-        safechat_core::signal_adapter::identity_fingerprint(&bundle.identity_key()?);
+    let actual_fingerprint = identity_fingerprint(&bundle.identity_key()?);
     let normalize = |value: &str| {
         value
             .chars()

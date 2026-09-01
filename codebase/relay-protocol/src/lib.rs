@@ -24,6 +24,7 @@ pub const MAX_MESSAGE_ID_BYTES: usize = 256;
 pub const MAX_ADDRESS_BYTES: usize = 256;
 pub const MAX_CIPHERTEXT_BYTES: usize = MAX_BODY;
 
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Submit {
     pub recipient: String,
@@ -32,6 +33,24 @@ pub struct Submit {
     pub ciphertext: Vec<u8>,
 }
 
+impl Submit {
+    /// Constructs a message submission with an optional expiry.
+    pub fn new(
+        recipient: impl Into<String>,
+        message_id: impl Into<String>,
+        expires_at: Option<u64>,
+        ciphertext: Vec<u8>,
+    ) -> Self {
+        Self {
+            recipient: recipient.into(),
+            message_id: message_id.into(),
+            expires_at,
+            ciphertext,
+        }
+    }
+}
+
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     pub server_id: i64,
@@ -41,6 +60,29 @@ pub struct Message {
     pub accepted_at: u64,
     pub expires_at: Option<u64>,
     pub ciphertext: Vec<u8>,
+}
+
+impl Message {
+    /// Constructs a relay message response.
+    pub fn new(
+        server_id: i64,
+        sender: impl Into<String>,
+        sender_address: Option<String>,
+        message_id: impl Into<String>,
+        accepted_at: u64,
+        expires_at: Option<u64>,
+        ciphertext: Vec<u8>,
+    ) -> Self {
+        Self {
+            server_id,
+            sender: sender.into(),
+            sender_address,
+            message_id: message_id.into(),
+            accepted_at,
+            expires_at,
+            ciphertext,
+        }
+    }
 }
 
 fn header(kind: u8, output: &mut Vec<u8>) {

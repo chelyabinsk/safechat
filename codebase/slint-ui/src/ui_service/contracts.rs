@@ -70,7 +70,6 @@ pub enum Event {
     ChatUpdated {
         messages: Vec<ConversationMessage>,
         status: String,
-        ciphertext: Option<String>,
         history_cursor: usize,
         has_more: bool,
         prepend: bool,

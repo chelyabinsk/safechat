@@ -2,7 +2,7 @@
 
 use crate::relay_client::RelayClient;
 use anyhow::{Result, bail};
-use safechat_core::signal_adapter::SignalPreKeyBundle;
+use safechat_core::signal::SignalPreKeyBundle;
 use safechat_core::transport::{
     ContactRequest, ContactTransport, DeliveryStatus, MessageTransport, TransportMessage,
 };

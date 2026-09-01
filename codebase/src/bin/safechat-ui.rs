@@ -154,13 +154,15 @@ fn setup_relay(
         return Ok(None);
     };
     let identity = futures_executor::block_on(state.local_identity_key_pair())?;
-    let config = RelayClientConfig {
-        base_url: options.base_url.clone(),
-        client_id: String::new(),
-        enrollment_secret: options.enrollment_secret.clone(),
-        ca_certificate_pem: options.ca_certificate_pem.clone(),
-        allow_insecure_http: options.allow_insecure_http,
-    };
+    let mut config = RelayClientConfig::new(
+        options.base_url.clone(),
+        String::new(),
+        options.enrollment_secret.clone(),
+    )
+    .with_insecure_http(options.allow_insecure_http);
+    if let Some(certificate) = options.ca_certificate_pem.clone() {
+        config = config.with_ca_certificate(certificate);
+    }
     let mut client = RelayClient::new(config, identity)?;
     if paths.relay_session.exists() {
         let token = load_relay_token(&paths.relay_session, password)?;

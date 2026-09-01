@@ -13,7 +13,8 @@ pub mod profile_store {
     pub use safechat_core::profile_store::*;
 }
 pub mod signal_adapter {
-    pub use safechat_core::signal_adapter::*;
+    pub use safechat_core::diagnostics::run_signal_demo;
+    pub use safechat_core::signal::*;
 }
 pub mod transport {
     pub use safechat_core::transport::*;

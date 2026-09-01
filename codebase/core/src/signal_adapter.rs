@@ -185,7 +185,8 @@ impl SafeChatMessage {
         }
     }
 
-    fn encode(&self) -> Result<Vec<u8>> {
+    /// Encodes the application message for transport.
+    pub fn encode(&self) -> Result<Vec<u8>> {
         if self.plaintext.len() > MAX_MESSAGE_LEN {
             bail!("message exceeds SafeChat limit");
         }
@@ -219,7 +220,8 @@ impl SafeChatMessage {
         Ok(output)
     }
 
-    fn decode(input: &[u8]) -> Result<Self> {
+    /// Decodes and validates an application message.
+    pub fn decode(input: &[u8]) -> Result<Self> {
         if input.len() < 2 {
             bail!("truncated SafeChat message");
         }
@@ -278,6 +280,11 @@ impl SafeChatMessage {
 }
 
 impl SignalEnvelope {
+    /// Signal message type for an established session.
+    pub const WHISPER_TYPE: u8 = CiphertextMessageType::Whisper as u8;
+    /// Signal message type for an initial pre-key session message.
+    pub const PREKEY_TYPE: u8 = CiphertextMessageType::PreKey as u8;
+
     /// Serialize a libsignal ciphertext with a SafeChat-owned, bounded frame.
     pub fn from_ciphertext(message: &CiphertextMessage) -> Result<Self> {
         let message_type = message.message_type() as u8;

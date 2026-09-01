@@ -180,7 +180,6 @@ mod tests {
         state.apply(&Event::ChatUpdated {
             messages: Vec::new(),
             status: "Chat history loaded.".to_owned(),
-            ciphertext: None,
             history_cursor: 0,
             has_more: false,
             prepend: false,

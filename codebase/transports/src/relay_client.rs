@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{Method, StatusCode, Url, header};
-use safechat_core::signal_adapter::SignalPreKeyBundle;
+use safechat_core::signal::SignalPreKeyBundle;
 use safechat_core::transport::{
     ContactRequest, DeliveryStatus, MessageTransport, TransportMessage,
 };
@@ -26,6 +26,7 @@ const ENROLLMENT_REQUEST_DOMAIN: &[u8] = b"safechat-relay-enrollment-request-v1\
 const MAX_RESPONSE_BYTES: usize = relay_binary::MAX_BODY;
 const MAX_REQUEST_ATTEMPTS: usize = 4;
 
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct RelayClientConfig {
     pub base_url: String,
@@ -33,6 +34,35 @@ pub struct RelayClientConfig {
     pub enrollment_secret: String,
     pub ca_certificate_pem: Option<Vec<u8>>,
     pub allow_insecure_http: bool,
+}
+
+impl RelayClientConfig {
+    /// Creates a relay configuration with secure defaults.
+    pub fn new(
+        base_url: impl Into<String>,
+        client_id: impl Into<String>,
+        enrollment_secret: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            client_id: client_id.into(),
+            enrollment_secret: enrollment_secret.into(),
+            ca_certificate_pem: None,
+            allow_insecure_http: false,
+        }
+    }
+
+    /// Adds a private CA certificate used to validate the relay.
+    pub fn with_ca_certificate(mut self, certificate_pem: Vec<u8>) -> Self {
+        self.ca_certificate_pem = Some(certificate_pem);
+        self
+    }
+
+    /// Explicitly permits HTTP for a trusted private-network hop.
+    pub fn with_insecure_http(mut self, allowed: bool) -> Self {
+        self.allow_insecure_http = allowed;
+        self
+    }
 }
 
 pub struct RelayClient {
@@ -265,12 +295,12 @@ impl RelayClient {
         ciphertext: &[u8],
         expires_at: Option<u64>,
     ) -> Result<RelayMessage> {
-        let body = relay_binary::encode_submit(&relay_binary::Submit {
-            recipient: recipient.to_owned(),
-            message_id: message_id.to_owned(),
+        let body = relay_binary::encode_submit(&relay_binary::Submit::new(
+            recipient,
+            message_id,
             expires_at,
-            ciphertext: ciphertext.to_vec(),
-        })?;
+            ciphertext.to_vec(),
+        ))?;
         let response = self.signed_binary(Method::POST, "/v1/messages", body, true)?;
         parse_binary_messages(&response)?
             .into_iter()
@@ -675,14 +705,16 @@ mod tests {
         relay_binary::encode_messages(
             &messages
                 .iter()
-                .map(|message| relay_binary::Message {
-                    server_id: message.server_id,
-                    sender: message.sender.clone(),
-                    sender_address: message.sender_address.clone(),
-                    message_id: message.message_id.clone(),
-                    accepted_at: message.accepted_at,
-                    expires_at: message.expires_at,
-                    ciphertext: message.ciphertext.clone(),
+                .map(|message| {
+                    relay_binary::Message::new(
+                        message.server_id,
+                        message.sender.clone(),
+                        message.sender_address.clone(),
+                        message.message_id.clone(),
+                        message.accepted_at,
+                        message.expires_at,
+                        message.ciphertext.clone(),
+                    )
                 })
                 .collect::<Vec<_>>(),
         )
@@ -750,15 +782,15 @@ mod tests {
     #[test]
     fn binary_message_parser_preserves_ciphertext_bytes() {
         let ciphertext = [0, 1, 2, 250, 255];
-        let packet = relay_binary::encode_messages(&[relay_binary::Message {
-            server_id: 7,
-            sender: "alice".into(),
-            sender_address: Some("alice.1".into()),
-            message_id: "message-7".into(),
-            accepted_at: 12,
-            expires_at: None,
-            ciphertext: ciphertext.to_vec(),
-        }])
+        let packet = relay_binary::encode_messages(&[relay_binary::Message::new(
+            7,
+            "alice",
+            Some("alice.1".into()),
+            "message-7",
+            12,
+            None,
+            ciphertext.to_vec(),
+        )])
         .unwrap();
 
         let messages = parse_binary_messages(&packet).unwrap();

@@ -89,7 +89,6 @@ pub(super) fn handle_command(
                 Some(Event::ChatUpdated {
                     messages: page.messages,
                     status: "Chat history loaded.".to_owned(),
-                    ciphertext: None,
                     history_cursor: page.cursor,
                     has_more: page.has_more,
                     prepend: false,
@@ -103,7 +102,6 @@ pub(super) fn handle_command(
                 Some(Event::ChatUpdated {
                     messages: page.messages,
                     status: "Older messages loaded.".to_owned(),
-                    ciphertext: None,
                     history_cursor: page.cursor,
                     has_more: page.has_more,
                     prepend: true,
@@ -122,11 +120,10 @@ pub(super) fn handle_command(
                     ports.history.as_ref(),
                     ports.clock.as_ref(),
                 )
-                .map(|(page, status, ciphertext)| {
+                .map(|(page, status, _ciphertext)| {
                     Some(Event::ChatUpdated {
                         messages: page.messages,
                         status,
-                        ciphertext: Some(ciphertext),
                         history_cursor: page.cursor,
                         has_more: page.has_more,
                         prepend: false,
@@ -137,7 +134,6 @@ pub(super) fn handle_command(
                     Some(Event::ChatUpdated {
                         messages: page.messages,
                         status,
-                        ciphertext: None,
                         history_cursor: page.cursor,
                         has_more: page.has_more,
                         prepend: false,
@@ -159,7 +155,6 @@ pub(super) fn handle_command(
                 Some(Event::ChatUpdated {
                     messages: page.messages,
                     status,
-                    ciphertext: None,
                     history_cursor: page.cursor,
                     has_more: page.has_more,
                     prepend: false,
@@ -171,7 +166,6 @@ pub(super) fn handle_command(
                 Some(Event::ChatUpdated {
                     messages: page.messages,
                     status,
-                    ciphertext: None,
                     history_cursor: page.cursor,
                     has_more: page.has_more,
                     prepend: false,

@@ -121,17 +121,17 @@ pub(super) fn decode_message_request(
 }
 
 pub(super) fn binary_message(message: &MessageResponse) -> anyhow::Result<relay_binary::Message> {
-    Ok(relay_binary::Message {
-        server_id: message.server_id,
-        sender: message.sender.clone(),
-        sender_address: message.sender_address.clone(),
-        message_id: message.message_id.clone(),
-        accepted_at: message.accepted_at,
-        expires_at: message.expires_at,
-        ciphertext: URL_SAFE_NO_PAD
+    Ok(relay_binary::Message::new(
+        message.server_id,
+        message.sender.clone(),
+        message.sender_address.clone(),
+        message.message_id.clone(),
+        message.accepted_at,
+        message.expires_at,
+        URL_SAFE_NO_PAD
             .decode(&message.ciphertext)
             .map_err(|error| anyhow::anyhow!("stored ciphertext is invalid: {error}"))?,
-    })
+    ))
 }
 
 pub(super) fn encode_binary_messages(messages: &[MessageResponse]) -> anyhow::Result<Vec<u8>> {

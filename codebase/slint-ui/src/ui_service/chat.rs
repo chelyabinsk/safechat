@@ -7,7 +7,7 @@ use safechat_core::profile_store::{
     EncryptedHistoryStore, HistoryEntry, HistoryFile, HistoryPage as CoreHistoryPage, HistoryStore,
     load_relay_config, load_relay_peer_ids, load_relay_token,
 };
-use safechat_core::signal_adapter::SqliteSignalState;
+use safechat_core::signal::SqliteSignalState;
 use safechat_core::transport::TextTransport;
 use safechat_transports::relay_client::{RelayClient, RelayClientConfig};
 use safechat_transports::relay_transport::RelayTransport;
@@ -134,16 +134,9 @@ fn open_relay_transport(
         .context("relay is not configured for this profile")?;
     let token = load_relay_token(&session_path, password)?;
     let identity = futures_executor::block_on(state.local_identity_key_pair())?;
-    let mut client = RelayClient::new(
-        RelayClientConfig {
-            base_url: config.base_url,
-            client_id: String::new(),
-            enrollment_secret: config.enrollment_secret,
-            ca_certificate_pem: None,
-            allow_insecure_http: config.allow_insecure_http,
-        },
-        identity,
-    )?;
+    let config = RelayClientConfig::new(config.base_url, String::new(), config.enrollment_secret)
+        .with_insecure_http(config.allow_insecure_http);
+    let mut client = RelayClient::new(config, identity)?;
     client.restore_access_token(token);
     Ok(RelayTransport::new(
         client,

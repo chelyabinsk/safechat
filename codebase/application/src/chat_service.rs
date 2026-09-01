@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use safechat_core::profile_store::{HistoryEntry, HistoryFile, HistoryStore};
-use safechat_core::signal_adapter::{SignalPreKeyBundle, SqliteSignalState};
+use safechat_core::signal::{SignalPreKeyBundle, SqliteSignalState};
 use safechat_core::transport::{DeliveryStatus, MessageTransport, TextTransport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

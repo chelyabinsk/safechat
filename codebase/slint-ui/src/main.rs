@@ -1,14 +1,13 @@
 slint::include_modules!();
 
-mod ui_service;
-
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use clap::Parser;
+use safechat_slint_ui::ui_service;
+use safechat_slint_ui::ui_service::{Command, Event, UiService, UiState};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use ui_service::{Command, Event, UiService, UiState};
 
 #[derive(Parser)]
 #[command(name = "safechat-slint-ui", version, about = "SafeChat desktop client")]
@@ -161,7 +160,6 @@ fn run_headless_smoke_test(debug: bool) -> Result<(), String> {
     state.apply(&Event::ChatUpdated {
         messages,
         status: "Message sent.".to_owned(),
-        ciphertext: None,
         history_cursor: 0,
         has_more: false,
         prepend: false,
