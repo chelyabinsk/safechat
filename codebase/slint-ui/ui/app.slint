@@ -126,6 +126,11 @@ export component MainWindow inherits Window {
                         }
                         if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading: ListView {
                             vertical-stretch: 1;
+                            // ListView uses a negative content offset. After the
+                            // initial page is loaded, jump to the newest messages.
+                            viewport-y: root.scroll-generation > 0
+                                ? min(0px, self.height - self.viewport-height)
+                                : 0px;
                             for message in root.chat-messages: HorizontalBox {
                                 width: parent.width;
                                     Rectangle { horizontal-stretch: message.outgoing ? 1 : 0; }
