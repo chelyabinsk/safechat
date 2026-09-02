@@ -35,6 +35,45 @@ export struct ChatMessage {
     ciphertext: string,
 }
 
+export struct UiText {
+    my-profile: string,
+    ready: string,
+    conversations: string,
+    search-conversations: string,
+    new-conversation: string,
+    verified-contact: string,
+    no-conversations: string,
+    verified-encrypted: string,
+    load-older: string,
+    new-conversation-help: string,
+    contact-bundle: string,
+    contact-fingerprint: string,
+    profile-password: string,
+    verify-add-contact: string,
+    contact-added: string,
+    select-conversation: string,
+    type-message: string,
+    send: string,
+    paste-encrypted: string,
+    receive-pasted: string,
+    unlock: string,
+    create-profile: string,
+    unlock-help: string,
+    create-help: string,
+    profile-name: string,
+    password: string,
+    confirm-password: string,
+    create-profile-button: string,
+    unlock-profile: string,
+    back-to-profiles: string,
+    create-new-profile: string,
+    fingerprint: string,
+    your-fingerprint: string,
+    share-bundle: string,
+    copy-bundle: string,
+    close: string,
+}
+
 export component MainWindow inherits Window {
     title: "SafeChat";
     preferred-width: 1080px;
@@ -43,6 +82,8 @@ export component MainWindow inherits Window {
     max-width: 1080px;
     min-height: 720px;
     max-height: 720px;
+
+    in property <UiText> locale;
 
     in-out property <string> status-text: "Ready";
     in-out property <string> profile-name: "default";
@@ -103,8 +144,8 @@ export component MainWindow inherits Window {
                         model: root.transport-options;
                         selected(value) => { root.selected-transport = value; root.choose-transport(value); }
                     }
-                    AppButton { label: "My profile"; enabled: root.profile-ready; clicked => { root.profile-info-open = true; } }
-                    Text { text: root.profile-ready ? "●  Ready" : ""; color: #bde7df; vertical-alignment: center; }
+                    AppButton { label: root.locale.my-profile; enabled: root.profile-ready; clicked => { root.profile-info-open = true; } }
+                    Text { text: root.profile-ready ? "●  " + root.locale.ready : ""; color: #bde7df; vertical-alignment: center; }
                 }
             }
 
@@ -117,10 +158,10 @@ export component MainWindow inherits Window {
                     VerticalBox {
                         padding: 18px;
                         spacing: 12px;
-                        Text { text: "Conversations"; font-size: 22px; color: #1f2933; font-weight: 600; }
-                        LineEdit { placeholder-text: "Search conversations"; }
+                        Text { text: root.locale.conversations; font-size: 22px; color: #1f2933; font-weight: 600; }
+                        LineEdit { placeholder-text: root.locale.search-conversations; }
                     AppButton {
-                        label: "＋  New conversation";
+                        label: "＋  " + root.locale.new-conversation;
                         primary: true;
                         height: 42px;
                         clicked => { root.new-chat(); }
@@ -139,11 +180,11 @@ export component MainWindow inherits Window {
                                     padding: 12px;
                                     spacing: 3px;
                                     Text { text: root.contact-name; font-size: 16px; color: #1f2933; font-weight: 600; }
-                                    Text { text: "Verified contact"; color: #667781; font-size: 12px; }
+                                    Text { text: root.locale.verified-contact; color: #667781; font-size: 12px; }
                                 }
                             }
                         }
-                        if !root.contact-added: Text { text: "No conversations yet"; color: #667781; horizontal-alignment: center; vertical-stretch: 1; }
+                        if !root.contact-added: Text { text: root.locale.no-conversations; color: #667781; horizontal-alignment: center; vertical-stretch: 1; }
                         Rectangle { vertical-stretch: 1; }
                     }
                 }
@@ -158,11 +199,11 @@ export component MainWindow inherits Window {
                             height: 34px;
                             spacing: 8px;
                             Text { text: root.contact-name; font-size: 19px; color: #263b3a; font-weight: 600; }
-                            Text { text: "Verified · end-to-end encrypted"; color: #64817c; font-size: 12px; vertical-alignment: center; }
+                            Text { text: root.locale.verified-encrypted; color: #64817c; font-size: 12px; vertical-alignment: center; }
                             Rectangle { horizontal-stretch: 1; }
                         }
                         if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading && !root.chat-loading && root.history-has-more: AppButton {
-                            label: "Load older messages  ↑";
+                            label: root.locale.load-older + "  ↑";
                             width: 190px;
                             clicked => { root.load-older-history(); }
                         }
@@ -209,29 +250,29 @@ export component MainWindow inherits Window {
                             }
                         }
                         if root.new-chat-open: GroupBox {
-                            title: "New conversation";
+                            title: root.locale.new-conversation;
                             width: 520px;
                             height: 270px;
                             vertical-stretch: 0;
                             VerticalBox {
                                 padding: 22px;
                                 spacing: 12px;
-                                Text { text: "Exchange public bundles through a trusted channel, then verify the fingerprint."; color: #526865; wrap: word-wrap; }
-                                peer_bundle := LineEdit { placeholder-text: "Contact public bundle"; }
-                                peer_fingerprint := LineEdit { placeholder-text: "Verified contact fingerprint"; }
-                                peer_password := LineEdit { placeholder-text: "Your profile password"; input-type: InputType.password; }
-                                AppButton { label: "Verify and add contact"; primary: true; clicked => { root.verify-add-contact(peer_bundle.text, peer_fingerprint.text, peer_password.text); } }
+                                Text { text: root.locale.new-conversation-help; color: #526865; wrap: word-wrap; }
+                                peer_bundle := LineEdit { placeholder-text: root.locale.contact-bundle; }
+                                peer_fingerprint := LineEdit { placeholder-text: root.locale.contact-fingerprint; }
+                                peer_password := LineEdit { placeholder-text: root.locale.profile-password; input-type: InputType.password; }
+                                AppButton { label: root.locale.verify-add-contact; primary: true; clicked => { root.verify-add-contact(peer_bundle.text, peer_fingerprint.text, peer_password.text); } }
                             }
                         }
                         if root.contact-added && !root.conversation-selected && !root.new-chat-open: Text {
-                            text: "Contact added — select it to open the chat";
+                            text: root.locale.contact-added;
                             font-size: 22px;
                             color: #41525d;
                             horizontal-alignment: center;
                             vertical-stretch: 1;
                         }
                         if !root.contact-added && !root.new-chat-open: Text {
-                            text: "Select a conversation";
+                            text: root.locale.select-conversation;
                             font-size: 24px;
                             color: #41525d;
                             horizontal-alignment: center;
@@ -248,23 +289,23 @@ export component MainWindow inherits Window {
                             height: 40px;
                             spacing: 8px;
                             message_input := LineEdit {
-                                placeholder-text: "Type a message";
+                                placeholder-text: root.locale.type-message;
                                 horizontal-stretch: 1;
                                 height: 40px;
                                 enabled: root.profile-ready;
                             }
-                            AppButton { label: "Send"; primary: true; width: 84px; height: 40px; enabled: root.profile-ready; clicked => { root.send-message(message_input.text); message_input.text = ""; } }
+                            AppButton { label: root.locale.send; primary: true; width: 84px; height: 40px; enabled: root.profile-ready; clicked => { root.send-message(message_input.text); message_input.text = ""; } }
                         }
                         if root.conversation-selected && !root.new-chat-open && !root.chat-loading && root.selected-transport == "Copy/paste": HorizontalBox {
                             height: 40px;
                             paste_input := LineEdit {
-                                placeholder-text: "Paste encrypted message here";
+                                placeholder-text: root.locale.paste-encrypted;
                                 horizontal-stretch: 1;
                                 height: 40px;
                                 enabled: root.profile-ready;
                             }
                             AppButton {
-                                label: "Receive pasted";
+                                label: root.locale.receive-pasted;
                                 height: 40px;
                                 width: 142px;
                                 enabled: root.profile-ready;
@@ -292,29 +333,29 @@ export component MainWindow inherits Window {
                 VerticalBox {
                     padding: 32px;
                     spacing: 16px;
-                    if !root.creating-profile: Text { text: "Unlock SafeChat"; font-size: 28px; color: #075e54; }
-                    if root.creating-profile: Text { text: "Create a SafeChat profile"; font-size: 28px; color: #075e54; }
-                    if !root.creating-profile: Text { text: "Select a profile and enter its password."; color: #667781; wrap: word-wrap; }
-                    if root.creating-profile: Text { text: "Create a separate encrypted identity for another user."; color: #667781; wrap: word-wrap; }
+                    if !root.creating-profile: Text { text: root.locale.unlock; font-size: 28px; color: #075e54; }
+                    if root.creating-profile: Text { text: root.locale.create-profile; font-size: 28px; color: #075e54; }
+                    if !root.creating-profile: Text { text: root.locale.unlock-help; color: #667781; wrap: word-wrap; }
+                    if root.creating-profile: Text { text: root.locale.create-help; color: #667781; wrap: word-wrap; }
                     if !root.creating-profile: ComboBox {
                         model: root.available-profiles;
                         selected(value) => { root.selected-profile = value; root.select-profile(value); }
                     }
-                    display_name := LineEdit { placeholder-text: "Profile name"; text: root.profile-name; visible: root.creating-profile; }
-                    password := LineEdit { placeholder-text: "Password"; input-type: InputType.password; }
-                    password_confirm := LineEdit { placeholder-text: "Confirm password"; input-type: InputType.password; visible: root.creating-profile; }
+                    display_name := LineEdit { placeholder-text: root.locale.profile-name; text: root.profile-name; visible: root.creating-profile; }
+                    password := LineEdit { placeholder-text: root.locale.password; input-type: InputType.password; }
+                    password_confirm := LineEdit { placeholder-text: root.locale.confirm-password; input-type: InputType.password; visible: root.creating-profile; }
                     AppButton {
-                        label: root.creating-profile ? "Create profile" : "Unlock profile";
+                        label: root.creating-profile ? root.locale.create-profile-button : root.locale.unlock-profile;
                         primary: true;
                         clicked => { root.initialize-profile(root.creating-profile ? display_name.text : root.selected-profile, password.text, root.creating-profile ? password_confirm.text : password.text); }
                     }
-                    AppButton { label: root.creating-profile ? "Back to profiles" : "Create new profile"; clicked => { root.begin-create-profile(); } }
+                    AppButton { label: root.creating-profile ? root.locale.back-to-profiles : root.locale.create-new-profile; clicked => { root.begin-create-profile(); } }
                     if root.fingerprint == "": Text { text: root.status-text; color: #667781; wrap: word-wrap; }
                     if root.fingerprint != "": TouchArea {
                         width: 480px;
                         height: 56px;
                         clicked => { root.copy-fingerprint(); }
-                        Text { text: "Fingerprint: " + root.fingerprint; color: #667781; wrap: char-wrap; width: 480px; horizontal-alignment: center; }
+                        Text { text: root.locale.fingerprint + ": " + root.fingerprint; color: #667781; wrap: char-wrap; width: 480px; horizontal-alignment: center; }
                     }
                 }
             }
@@ -336,19 +377,19 @@ export component MainWindow inherits Window {
                 VerticalBox {
                     padding: 28px;
                     spacing: 14px;
-                    Text { text: "My profile"; font-size: 26px; color: #075e54; }
-                    Text { text: "Your fingerprint"; color: #667781; }
+                    Text { text: root.locale.my-profile; font-size: 26px; color: #075e54; }
+                    Text { text: root.locale.your-fingerprint; color: #667781; }
                     TouchArea {
                         width: 424px;
                         height: 64px;
                         clicked => { root.copy-fingerprint(); }
                         Text { text: root.fingerprint; font-size: 20px; color: #1f2933; wrap: char-wrap; width: 424px; horizontal-alignment: center; }
                     }
-                    Text { text: "Share the public bundle only through a trusted channel."; color: #667781; wrap: word-wrap; }
+                    Text { text: root.locale.share-bundle; color: #667781; wrap: word-wrap; }
                     HorizontalBox {
                         spacing: 8px;
-                        AppButton { label: "Copy public bundle"; primary: true; clicked => { root.copy-bundle(); } }
-                        AppButton { label: "Close"; clicked => { root.profile-info-open = false; } }
+                        AppButton { label: root.locale.copy-bundle; primary: true; clicked => { root.copy-bundle(); } }
+                        AppButton { label: root.locale.close; clicked => { root.profile-info-open = false; } }
                     }
                 }
             }

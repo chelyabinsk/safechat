@@ -1,5 +1,7 @@
 slint::include_modules!();
 
+mod localization;
+
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use clap::Parser;
 use safechat_slint_ui::ui_service;
@@ -18,6 +20,9 @@ struct Cli {
     /// Run the UI state/model smoke test without opening a graphical window.
     #[arg(long)]
     headless: bool,
+    /// UI language (`en` or `ru`).
+    #[arg(long, default_value = "en")]
+    language: String,
 }
 
 const WINDOW_WIDTH: f32 = 1080.0;
@@ -225,6 +230,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let window = MainWindow::new()?;
     configure_window(&window);
+    window.set_locale(localization::ui_text(&cli.language));
     let service = Arc::new(UiService::new_with_debug(cli.debug));
     let profiles = service
         .available_profiles()
