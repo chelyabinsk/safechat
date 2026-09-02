@@ -26,6 +26,65 @@ component AppButton inherits Rectangle {
     }
 }
 
+component HeaderButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 36px;
+    border-radius: 8px;
+    background: header_touch.pressed ? #145f56 : #0b7166;
+    border-width: 1px;
+    border-color: #2b887c;
+    animate background { duration: 120ms; }
+
+    header_touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.label;
+        color: white;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component HeaderSelector inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    width: max(142px, selector_label.preferred-width + 44px);
+    height: 36px;
+    border-radius: 8px;
+    background: selector_touch.pressed ? #145f56 : #0b7166;
+    border-width: 1px;
+    border-color: #2b887c;
+    animate background { duration: 120ms; }
+
+    selector_touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    selector_label := Text {
+        text: root.label;
+        color: white;
+        font-size: 13px;
+        font-weight: 600;
+        x: 12px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        text: "▾";
+        color: #bde7df;
+        font-size: 14px;
+        x: parent.width - 22px;
+        width: 14px;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
 component FlagIcon inherits Rectangle {
     in property <string> country;
     width: 24px;
@@ -186,6 +245,7 @@ export component MainWindow inherits Window {
     in-out property <[string]> transport-options: [];
     in-out property <string> selected-language: "en";
     in-out property <bool> language-menu-open: false;
+    in-out property <bool> transport-menu-open: false;
     in-out property <bool> profile-ready: false;
     in-out property <string> fingerprint: "";
     in-out property <string> public-bundle: "";
@@ -220,29 +280,69 @@ export component MainWindow inherits Window {
 
             Rectangle {
                 height: 72px;
-                background: #075e54;
+                background: #06483f;
+                border-width: 1px;
+                border-color: #0b7064;
                 HorizontalBox {
-                    padding-left: 26px;
-                    padding-right: 26px;
-                    spacing: 14px;
-                    Text { text: "SafeChat"; color: white; font-size: 26px; font-weight: 600; }
-                    Text { text: root.profile-name; color: #bde7df; horizontal-stretch: 1; vertical-alignment: center; }
-                    if root.conversation-selected && !root.history-loading: ComboBox {
-                        model: root.transport-options;
-                        selected(value) => { root.selected-transport = value; root.choose-transport(value); }
+                    padding-left: 22px;
+                    padding-right: 22px;
+                    spacing: 12px;
+                    Text { text: "SafeChat"; color: white; font-size: 25px; font-weight: 600; }
+                    Rectangle {
+                        width: 1px;
+                        height: 28px;
+                        background: #39877d;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 36px;
+                        border-radius: 8px;
+                        background: #0a584f;
+                        border-width: 1px;
+                        border-color: #1d746a;
+                        Text {
+                            text: root.profile-name;
+                            color: #d2eee9;
+                            font-size: 13px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            x: 12px;
+                            width: parent.width - 24px;
+                            overflow: elide;
+                        }
+                    }
+                    if root.conversation-selected && !root.history-loading: HeaderSelector {
+                        label: root.selected-transport;
+                        clicked => { root.transport-menu-open = !root.transport-menu-open; root.language-menu-open = false; }
                     }
                     if !root.history-loading: Rectangle {
                         width: 42px;
                         height: 36px;
                         border-radius: 8px;
-                        background: language_menu_touch.pressed ? #0a6d62 : #075e54;
+                        background: language_menu_touch.pressed ? #145f56 : #0b7166;
+                        border-width: 1px;
+                        border-color: #2b887c;
+                        animate background { duration: 120ms; }
                         language_menu_touch := TouchArea {
-                            clicked => { root.language-menu-open = !root.language-menu-open; }
+                            clicked => { root.language-menu-open = !root.language-menu-open; root.transport-menu-open = false; }
                         }
                         FlagIcon { country: root.selected-language; x: 9px; y: 10px; }
                     }
-                    AppButton { label: root.locale.my-profile; enabled: root.profile-ready; clicked => { root.profile-info-open = true; } }
-                    Text { text: root.profile-ready ? "●  " + root.locale.ready : ""; color: #bde7df; vertical-alignment: center; }
+                    HeaderButton { label: root.locale.my-profile; enabled: root.profile-ready; clicked => { root.profile-info-open = true; } }
+                    Rectangle {
+                        width: 78px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: root.profile-ready ? #0b7166 : #0a584f;
+                        Text {
+                            text: root.profile-ready ? "●  " + root.locale.ready : "";
+                            color: #d2eee9;
+                            font-size: 12px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
 
@@ -443,6 +543,36 @@ export component MainWindow inherits Window {
                     height: 32px;
                     clicked => { root.choose-language("ru"); root.language-menu-open = false; }
                     HorizontalBox { width: parent.width; height: parent.height; spacing: 8px; FlagIcon { country: "ru"; } Text { text: root.locale.language-russian; color: #23433f; vertical-alignment: center; } }
+                }
+            }
+        }
+
+        if root.transport-menu-open: Rectangle {
+            x: parent.width - 360px;
+            y: 72px;
+            width: 154px;
+            height: 84px;
+            background: white;
+            border-radius: 9px;
+            border-width: 1px;
+            border-color: #d5e2de;
+            z: 20;
+            VerticalBox {
+                width: parent.width;
+                height: parent.height;
+                padding: 6px;
+                spacing: 3px;
+                if root.transport-options.length > 0: TouchArea {
+                    width: parent.width;
+                    height: 32px;
+                    clicked => { root.selected-transport = root.transport-options[0]; root.choose-transport(root.transport-options[0]); root.transport-menu-open = false; }
+                    Text { text: root.transport-options[0]; color: #23433f; x: 10px; width: parent.width - 20px; vertical-alignment: center; overflow: elide; }
+                }
+                if root.transport-options.length > 1: TouchArea {
+                    width: parent.width;
+                    height: 32px;
+                    clicked => { root.selected-transport = root.transport-options[1]; root.choose-transport(root.transport-options[1]); root.transport-menu-open = false; }
+                    Text { text: root.transport-options[1]; color: #23433f; x: 10px; width: parent.width - 20px; vertical-alignment: center; overflow: elide; }
                 }
             }
         }
