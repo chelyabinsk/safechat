@@ -26,6 +26,75 @@ component AppButton inherits Rectangle {
     }
 }
 
+component FlagIcon inherits Rectangle {
+    in property <string> country;
+    width: 24px;
+    height: 16px;
+    border-radius: 2px;
+    clip: true;
+    background: country == "ru" ? #ffffff : #1f3f95;
+
+    if country == "ru": Rectangle { x: 0px; y: 0px; width: parent.width; height: 5px; background: white; }
+    if country == "ru": Rectangle { x: 0px; y: 5px; width: parent.width; height: 6px; background: #1f4f9b; }
+    if country == "ru": Rectangle { x: 0px; y: 11px; width: parent.width; height: 5px; background: #d52b1e; }
+    if country != "ru": Path {
+        width: parent.width;
+        height: parent.height;
+        fill: white;
+        MoveTo { x: 0; y: 0; }
+        LineTo { x: 3; y: 0; }
+        LineTo { x: 24; y: 13; }
+        LineTo { x: 24; y: 16; }
+        Close {}
+    }
+    if country != "ru": Path {
+        width: parent.width;
+        height: parent.height;
+        fill: white;
+        MoveTo { x: 21; y: 0; }
+        LineTo { x: 24; y: 0; }
+        LineTo { x: 3; y: 16; }
+        LineTo { x: 0; y: 16; }
+        Close {}
+    }
+    if country != "ru": Path {
+        width: parent.width;
+        height: parent.height;
+        fill: #d51f36;
+        MoveTo { x: 0; y: 0; }
+        LineTo { x: 1; y: 0; }
+        LineTo { x: 24; y: 14; }
+        LineTo { x: 24; y: 15; }
+        Close {}
+    }
+    if country != "ru": Path {
+        width: parent.width;
+        height: parent.height;
+        fill: #d51f36;
+        MoveTo { x: 23; y: 0; }
+        LineTo { x: 24; y: 0; }
+        LineTo { x: 1; y: 16; }
+        LineTo { x: 0; y: 16; }
+        Close {}
+    }
+    if country != "ru": Rectangle {
+        x: 0px;
+        y: 6px;
+        width: parent.width;
+        height: 4px;
+        background: white;
+        Rectangle { x: 9px; y: -6px; width: 6px; height: 16px; background: white; }
+    }
+    if country != "ru": Rectangle {
+        x: 0px;
+        y: 7px;
+        width: parent.width;
+        height: 2px;
+        background: #d51f36;
+        Rectangle { x: 11px; y: -7px; width: 3px; height: 16px; background: #d51f36; }
+    }
+}
+
 export struct ChatMessage {
     sender: string,
     text: string,
@@ -84,6 +153,8 @@ export struct UiText {
     decrypting-pasted: string,
     copy-paste: string,
     relay: string,
+    language-english: string,
+    language-russian: string,
 }
 
 export component MainWindow inherits Window {
@@ -113,6 +184,8 @@ export component MainWindow inherits Window {
     in-out property <[ChatMessage]> chat-messages: [];
     in-out property <string> selected-transport: "Copy/paste";
     in-out property <[string]> transport-options: [];
+    in-out property <string> selected-language: "en";
+    in-out property <bool> language-menu-open: false;
     in-out property <bool> profile-ready: false;
     in-out property <string> fingerprint: "";
     in-out property <string> public-bundle: "";
@@ -122,6 +195,7 @@ export component MainWindow inherits Window {
     in-out property <int> scroll-generation: 0;
     in-out property <string> copied-ciphertext: "";
     callback choose-transport(string);
+    callback choose-language(string);
     callback send-message(string);
     callback initialize-profile(string, string, string);
     callback new-chat();
@@ -138,9 +212,10 @@ export component MainWindow inherits Window {
     Rectangle {
         width: parent.width;
         height: parent.height;
-        background: #f4f7f6;
+        background: #eef4f2;
 
         VerticalBox {
+            vertical-stretch: 1;
             spacing: 0px;
 
             Rectangle {
@@ -156,16 +231,28 @@ export component MainWindow inherits Window {
                         model: root.transport-options;
                         selected(value) => { root.selected-transport = value; root.choose-transport(value); }
                     }
+                    if !root.history-loading: Rectangle {
+                        width: 42px;
+                        height: 36px;
+                        border-radius: 8px;
+                        background: language_menu_touch.pressed ? #0a6d62 : #075e54;
+                        language_menu_touch := TouchArea {
+                            clicked => { root.language-menu-open = !root.language-menu-open; }
+                        }
+                        FlagIcon { country: root.selected-language; x: 9px; y: 10px; }
+                    }
                     AppButton { label: root.locale.my-profile; enabled: root.profile-ready; clicked => { root.profile-info-open = true; } }
                     Text { text: root.profile-ready ? "●  " + root.locale.ready : ""; color: #bde7df; vertical-alignment: center; }
                 }
             }
 
             HorizontalBox {
+                vertical-stretch: 1;
                 spacing: 0px;
 
                 Rectangle {
                     width: 292px;
+                    vertical-stretch: 1;
                     background: white;
                     VerticalBox {
                         padding: 18px;
@@ -202,6 +289,7 @@ export component MainWindow inherits Window {
                 }
 
                 Rectangle {
+                    vertical-stretch: 1;
                     background: #eef4f2;
                     horizontal-stretch: 1;
                     VerticalBox {
@@ -210,8 +298,8 @@ export component MainWindow inherits Window {
                         if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading: HorizontalBox {
                             height: 34px;
                             spacing: 8px;
-                            Text { text: root.contact-name; font-size: 19px; color: #263b3a; font-weight: 600; }
-                            Text { text: root.locale.verified-encrypted; color: #64817c; font-size: 12px; vertical-alignment: center; }
+                            Text { text: root.contact-name; height: parent.height; font-size: 19px; color: #263b3a; font-weight: 600; vertical-alignment: center; }
+                            Text { text: root.locale.verified-encrypted; height: parent.height; color: #64817c; font-size: 12px; vertical-alignment: center; }
                             Rectangle { horizontal-stretch: 1; }
                         }
                         if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading && !root.chat-loading && root.history-has-more: AppButton {
@@ -325,6 +413,36 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        if root.language-menu-open: Rectangle {
+            x: parent.width - 190px;
+            y: 72px;
+            width: 126px;
+            height: 84px;
+            background: white;
+            border-radius: 9px;
+            border-width: 1px;
+            border-color: #d5e2de;
+            z: 20;
+            VerticalBox {
+                width: parent.width;
+                height: parent.height;
+                padding: 6px;
+                spacing: 3px;
+                TouchArea {
+                    width: parent.width;
+                    height: 32px;
+                    clicked => { root.choose-language("en"); root.language-menu-open = false; }
+                    HorizontalBox { width: parent.width; height: parent.height; spacing: 8px; FlagIcon { country: "en"; } Text { text: root.locale.language-english; color: #23433f; vertical-alignment: center; } }
+                }
+                TouchArea {
+                    width: parent.width;
+                    height: 32px;
+                    clicked => { root.choose-language("ru"); root.language-menu-open = false; }
+                    HorizontalBox { width: parent.width; height: parent.height; spacing: 8px; FlagIcon { country: "ru"; } Text { text: root.locale.language-russian; color: #23433f; vertical-alignment: center; } }
                 }
             }
         }
