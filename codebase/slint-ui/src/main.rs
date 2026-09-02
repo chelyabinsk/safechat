@@ -141,7 +141,19 @@ fn run_headless_smoke_test(debug: bool) -> Result<(), String> {
         bundle: "bundle".to_owned(),
         contact: Some(("Bob".to_owned(), "peer-bundle".to_owned())),
     });
-    state.conversation_selected = true;
+
+    // Reproduce the GUI sequence that previously left the new-conversation
+    // dialog visible after selecting the verified contact.
+    state.new_chat_open = true;
+    let select_existing = Command::LoadHistory {
+        peer: "peer-bundle".to_owned(),
+    };
+    state.prepare(&select_existing);
+    if state.new_chat_open || !state.conversation_selected {
+        return Err("selecting the verified contact did not close new-chat mode".to_owned());
+    }
+    state.chat_loading = false;
+    state.history_loading = false;
 
     let messages = (0..10)
         .map(|index| ui_service::ConversationMessage {
@@ -298,16 +310,23 @@ fn main() -> Result<(), slint::PlatformError> {
     let state_for_select = Rc::clone(&state);
     let options_for_select = transport_options.clone();
     window.on_select_contact(move || {
-        let peer = state_for_select.borrow().contact_bundle.clone();
-        if peer.is_empty() || state_for_select.borrow().chat_loading {
+        let snapshot = state_for_select.borrow().clone();
+        let peer = snapshot.contact_bundle.clone();
+        if peer.is_empty() || snapshot.chat_loading {
             return;
         }
-        let command =
-            if state_for_select.borrow().selected_transport == ui_service::TransportKind::Relay {
-                Command::Poll { peer }
-            } else {
-                Command::LoadHistory { peer }
-            };
+        if snapshot.conversation_selected {
+            state_for_select.borrow_mut().return_to_existing_chat();
+            if let Some(window) = window_weak.upgrade() {
+                render_state(&window, &state_for_select.borrow(), &options_for_select);
+            }
+            return;
+        }
+        let command = if snapshot.selected_transport == ui_service::TransportKind::Relay {
+            Command::Poll { peer }
+        } else {
+            Command::LoadHistory { peer }
+        };
         {
             let mut state = state_for_select.borrow_mut();
             state.conversation_selected = true;

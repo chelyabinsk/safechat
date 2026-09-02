@@ -65,9 +65,15 @@ impl UiState {
         match command {
             Command::Initialize { .. } => self.status = "Unlocking encrypted profile…".to_owned(),
             Command::VerifyContact { .. } => self.status = "Verifying contact…".to_owned(),
-            Command::LoadHistory { .. }
-            | Command::LoadOlderHistory { .. }
-            | Command::Poll { .. } => {
+            Command::LoadHistory { .. } | Command::Poll { .. } => {
+                self.new_chat_open = false;
+                self.conversation_selected = true;
+                self.chat_loading = true;
+                self.history_loading = true;
+                self.loading_text = "Decrypting chat history…".to_owned();
+                self.status = "Conversation selected.".to_owned();
+            }
+            Command::LoadOlderHistory { .. } => {
                 self.chat_loading = true;
                 self.history_loading = true;
                 self.loading_text = "Decrypting chat history…".to_owned();
@@ -162,11 +168,18 @@ impl UiState {
         self.selected_transport = transport;
         self.status = format!("Selected transport: {transport}");
     }
+
+    /// Returns to the already-loaded conversation without starting another
+    /// history operation.
+    pub fn return_to_existing_chat(&mut self) {
+        self.new_chat_open = false;
+        self.conversation_selected = true;
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, Event, TransportKind, UiState};
+    use super::{Command, ConversationMessage, Event, TransportKind, UiState};
 
     #[test]
     fn state_transitions_capture_loading_and_results_without_view_access() {
@@ -208,5 +221,49 @@ mod tests {
             text: "hello".to_owned(),
         });
         assert_eq!(state.loading_text, "Encrypting and sending…");
+    }
+
+    #[test]
+    fn selecting_existing_chat_closes_new_chat_mode() {
+        let mut state = UiState::from_profiles(vec!["alice".to_owned()]);
+        state.new_chat_open = true;
+
+        state.prepare(&Command::LoadHistory {
+            peer: "peer".to_owned(),
+        });
+
+        assert!(!state.new_chat_open);
+        assert!(state.conversation_selected);
+        assert!(state.history_loading);
+    }
+
+    #[test]
+    fn returning_to_loaded_chat_only_changes_view_state() {
+        let mut state = UiState::from_profiles(vec!["alice".to_owned()]);
+        state.conversation_selected = true;
+        state.new_chat_open = true;
+        state.chat_loading = false;
+        state.history_loading = false;
+        state.messages.push(ConversationMessage {
+            sender: "You".to_owned(),
+            text: "hello".to_owned(),
+            timestamp: 0,
+            outgoing: true,
+            status: "sent".to_owned(),
+            ciphertext: String::new(),
+        });
+
+        state.return_to_existing_chat();
+
+        assert!(!state.new_chat_open);
+        assert!(state.conversation_selected);
+        assert!(!state.chat_loading);
+        assert!(!state.history_loading);
+        assert_eq!(state.messages.len(), 1);
+
+        state.return_to_existing_chat();
+        assert!(!state.chat_loading);
+        assert!(!state.history_loading);
+        assert_eq!(state.messages.len(), 1);
     }
 }
