@@ -1,4 +1,4 @@
-import { ComboBox, GroupBox, HorizontalBox, LineEdit, ListView, VerticalBox } from "std-widgets.slint";
+import { ComboBox, GroupBox, HorizontalBox, LineEdit, ListView, Palette, VerticalBox } from "std-widgets.slint";
 
 component AppButton inherits Rectangle {
     in property <string> label;
@@ -254,6 +254,21 @@ export component MainWindow inherits Window {
     in-out property <bool> history-has-more: false;
     in-out property <int> scroll-generation: 0;
     in-out property <string> copied-ciphertext: "";
+    // The widget palette tracks the desktop light/dark preference. Keep the
+    // application surfaces aligned with it instead of mixing a light shell
+    // with dark native controls.
+    property <bool> dark-theme: Palette.color-scheme == ColorScheme.dark;
+    property <color> app-background: dark-theme ? #111918 : #eef4f2;
+    property <color> panel-background: dark-theme ? #182321 : white;
+    property <color> elevated-background: dark-theme ? #202e2b : white;
+    property <color> primary-text: dark-theme ? #eef7f4 : #1f2933;
+    property <color> secondary-text: dark-theme ? #b5c8c3 : #667781;
+    property <color> muted-text: dark-theme ? #91aaa3 : #526865;
+    property <color> input-background: dark-theme ? #263733 : #f7faf9;
+    property <color> input-border: dark-theme ? #46635c : #d5e2de;
+    property <color> bubble-incoming: dark-theme ? #202e2b : white;
+    property <color> bubble-outgoing: dark-theme ? #17483f : #d9f5e9;
+    property <color> bubble-border: dark-theme ? #38514b : #e4eae8;
     callback choose-transport(string);
     callback choose-language(string);
     callback send-message(string);
@@ -272,7 +287,7 @@ export component MainWindow inherits Window {
     Rectangle {
         width: parent.width;
         height: parent.height;
-        background: #eef4f2;
+        background: root.app-background;
 
         VerticalBox {
             vertical-stretch: 1;
@@ -353,11 +368,11 @@ export component MainWindow inherits Window {
                 Rectangle {
                     width: 292px;
                     vertical-stretch: 1;
-                    background: white;
+                    background: root.panel-background;
                     VerticalBox {
                         padding: 18px;
                         spacing: 12px;
-                        Text { text: root.locale.conversations; font-size: 22px; color: #1f2933; font-weight: 600; }
+                        Text { text: root.locale.conversations; font-size: 22px; color: root.primary-text; font-weight: 600; }
                         LineEdit { placeholder-text: root.locale.search-conversations; }
                     AppButton {
                         label: "＋  " + root.locale.new-conversation;
@@ -370,27 +385,27 @@ export component MainWindow inherits Window {
                             enabled: !root.chat-loading;
                             clicked => { root.select-contact(); }
                             Rectangle {
-                                background: root.conversation-selected && !root.new-chat-open ? #dff3ee : #f3f6f5;
+                                background: root.conversation-selected && !root.new-chat-open ? (root.dark-theme ? #24554c : #dff3ee) : (root.dark-theme ? #22312e : #f3f6f5);
                                 border-radius: 10px;
                                 border-width: 1px;
-                                border-color: root.conversation-selected && !root.new-chat-open ? #a8d9cf : #e5eae8;
+                                border-color: root.conversation-selected && !root.new-chat-open ? (root.dark-theme ? #4b8d80 : #a8d9cf) : (root.dark-theme ? #344944 : #e5eae8);
                                 animate background { duration: 160ms; }
                                 VerticalBox {
                                     padding: 12px;
                                     spacing: 3px;
-                                    Text { text: root.contact-name; font-size: 16px; color: #1f2933; font-weight: 600; }
-                                    Text { text: root.locale.verified-contact; color: #667781; font-size: 12px; }
+                                    Text { text: root.contact-name; font-size: 16px; color: root.primary-text; font-weight: 600; }
+                                    Text { text: root.locale.verified-contact; color: root.secondary-text; font-size: 12px; }
                                 }
                             }
                         }
-                        if !root.contact-added: Text { text: root.locale.no-conversations; color: #667781; horizontal-alignment: center; vertical-stretch: 1; }
+                        if !root.contact-added: Text { text: root.locale.no-conversations; color: root.secondary-text; horizontal-alignment: center; vertical-stretch: 1; }
                         Rectangle { vertical-stretch: 1; }
                     }
                 }
 
                 Rectangle {
                     vertical-stretch: 1;
-                    background: #eef4f2;
+                    background: root.app-background;
                     horizontal-stretch: 1;
                     VerticalBox {
                         padding: 26px;
@@ -398,8 +413,8 @@ export component MainWindow inherits Window {
                         if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading: HorizontalBox {
                             height: 34px;
                             spacing: 8px;
-                            Text { text: root.contact-name; height: parent.height; font-size: 19px; color: #263b3a; font-weight: 600; vertical-alignment: center; }
-                            Text { text: root.locale.verified-encrypted; height: parent.height; color: #64817c; font-size: 12px; vertical-alignment: center; }
+                            Text { text: root.contact-name; height: parent.height; font-size: 19px; color: root.primary-text; font-weight: 600; vertical-alignment: center; }
+                            Text { text: root.locale.verified-encrypted; height: parent.height; color: root.secondary-text; font-size: 12px; vertical-alignment: center; }
                             Rectangle { horizontal-stretch: 1; }
                         }
                         if root.contact-added && root.conversation-selected && !root.new-chat-open && !root.history-loading && !root.chat-loading && root.history-has-more: AppButton {
@@ -425,23 +440,23 @@ export component MainWindow inherits Window {
                                             width: parent.width;
                                             height: max(68px, message_content.preferred-height);
                                             background: message.ciphertext == root.copied-ciphertext
-                                                ? #b9e8c8
-                                                : message.outgoing ? #d9f5e9 : #ffffff;
+                                                ? (root.dark-theme ? #2c6a54 : #b9e8c8)
+                                                : message.outgoing ? root.bubble-outgoing : root.bubble-incoming;
                                             animate background { duration: 180ms; }
                                             border-radius: 12px;
                                             border-width: 1px;
                                             border-color: message.ciphertext == root.copied-ciphertext
                                                 ? #76c996
-                                                : message.outgoing ? #c2e8dc : #e4eae8;
+                                                : message.outgoing ? (root.dark-theme ? #3c7565 : #c2e8dc) : root.bubble-border;
                                             message_content := VerticalBox {
                                                 width: parent.width;
                                                 padding: 12px;
                                                 spacing: 4px;
-                                                Text { text: message.sender; color: #52716d; font-size: 12px; font-weight: 600; }
-                                                Text { text: message.text; width: parent.width - 20px; color: #1f2933; wrap: word-wrap; }
+                                                Text { text: message.sender; color: root.muted-text; font-size: 12px; font-weight: 600; }
+                                                Text { text: message.text; width: parent.width - 20px; color: root.primary-text; wrap: word-wrap; }
                                                 HorizontalBox {
-                                                    Text { text: message.timestamp; color: #8696a0; font-size: 10px; horizontal-stretch: 1; }
-                                                    if message.outgoing: Text { text: message.status; color: #667781; font-size: 10px; }
+                                                    Text { text: message.timestamp; color: root.secondary-text; font-size: 10px; horizontal-stretch: 1; }
+                                                    if message.outgoing: Text { text: message.status; color: root.secondary-text; font-size: 10px; }
                                                 }
                                             }
                                         }
@@ -457,7 +472,7 @@ export component MainWindow inherits Window {
                             VerticalBox {
                                 padding: 22px;
                                 spacing: 12px;
-                                Text { text: root.locale.new-conversation-help; color: #526865; wrap: word-wrap; }
+                                Text { text: root.locale.new-conversation-help; color: root.muted-text; wrap: word-wrap; }
                                 peer_bundle := LineEdit { placeholder-text: root.locale.contact-bundle; }
                                 peer_fingerprint := LineEdit { placeholder-text: root.locale.contact-fingerprint; }
                                 peer_password := LineEdit { placeholder-text: root.locale.profile-password; input-type: InputType.password; }
@@ -467,21 +482,21 @@ export component MainWindow inherits Window {
                         if root.contact-added && !root.conversation-selected && !root.new-chat-open: Text {
                             text: root.locale.contact-added;
                             font-size: 22px;
-                            color: #41525d;
+                            color: root.primary-text;
                             horizontal-alignment: center;
                             vertical-stretch: 1;
                         }
                         if !root.contact-added && !root.new-chat-open: Text {
                             text: root.locale.select-conversation;
                             font-size: 24px;
-                            color: #41525d;
+                            color: root.primary-text;
                             horizontal-alignment: center;
                             vertical-stretch: 1;
                         }
-                        if !root.chat-loading: Text { text: root.status-text; color: #667781; horizontal-alignment: center; }
+                        if !root.chat-loading: Text { text: root.status-text; color: root.secondary-text; horizontal-alignment: center; }
                         if root.conversation-selected && root.chat-loading: Text {
                             text: root.loading-text;
-                            color: #667781;
+                            color: root.secondary-text;
                             font-size: 12px;
                             horizontal-alignment: center;
                         }
@@ -522,10 +537,10 @@ export component MainWindow inherits Window {
             y: 72px;
             width: 126px;
             height: 84px;
-            background: white;
+            background: root.elevated-background;
             border-radius: 9px;
             border-width: 1px;
-            border-color: #d5e2de;
+            border-color: root.input-border;
             z: 20;
             VerticalBox {
                 width: parent.width;
@@ -536,13 +551,13 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: 32px;
                     clicked => { root.choose-language("en"); root.language-menu-open = false; }
-                    HorizontalBox { width: parent.width; height: parent.height; spacing: 8px; FlagIcon { country: "en"; } Text { text: root.locale.language-english; color: #23433f; vertical-alignment: center; } }
+                    HorizontalBox { width: parent.width; height: parent.height; spacing: 8px; FlagIcon { country: "en"; } Text { text: root.locale.language-english; color: root.primary-text; vertical-alignment: center; } }
                 }
                 TouchArea {
                     width: parent.width;
                     height: 32px;
                     clicked => { root.choose-language("ru"); root.language-menu-open = false; }
-                    HorizontalBox { width: parent.width; height: parent.height; spacing: 8px; FlagIcon { country: "ru"; } Text { text: root.locale.language-russian; color: #23433f; vertical-alignment: center; } }
+                    HorizontalBox { width: parent.width; height: parent.height; spacing: 8px; FlagIcon { country: "ru"; } Text { text: root.locale.language-russian; color: root.primary-text; vertical-alignment: center; } }
                 }
             }
         }
@@ -552,10 +567,10 @@ export component MainWindow inherits Window {
             y: 72px;
             width: 154px;
             height: 84px;
-            background: white;
+            background: root.elevated-background;
             border-radius: 9px;
             border-width: 1px;
-            border-color: #d5e2de;
+            border-color: root.input-border;
             z: 20;
             VerticalBox {
                 width: parent.width;
@@ -566,13 +581,13 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: 32px;
                     clicked => { root.selected-transport = root.transport-options[0]; root.choose-transport(root.transport-options[0]); root.transport-menu-open = false; }
-                    Text { text: root.transport-options[0]; color: #23433f; x: 10px; width: parent.width - 20px; vertical-alignment: center; overflow: elide; }
+                    Text { text: root.transport-options[0]; color: root.primary-text; x: 10px; width: parent.width - 20px; vertical-alignment: center; overflow: elide; }
                 }
                 if root.transport-options.length > 1: TouchArea {
                     width: parent.width;
                     height: 32px;
                     clicked => { root.selected-transport = root.transport-options[1]; root.choose-transport(root.transport-options[1]); root.transport-menu-open = false; }
-                    Text { text: root.transport-options[1]; color: #23433f; x: 10px; width: parent.width - 20px; vertical-alignment: center; overflow: elide; }
+                    Text { text: root.transport-options[1]; color: root.primary-text; x: 10px; width: parent.width - 20px; vertical-alignment: center; overflow: elide; }
                 }
             }
         }
@@ -586,17 +601,17 @@ export component MainWindow inherits Window {
                 y: (parent.height - self.height) / 2;
                 width: 540px;
                 height: 560px;
-                background: white;
+                background: root.elevated-background;
                 border-radius: 16px;
                 border-width: 1px;
-                border-color: #dce6e2;
+                border-color: root.input-border;
                 VerticalBox {
                     padding: 32px;
                     spacing: 16px;
                     if !root.creating-profile: Text { text: root.locale.unlock; font-size: 28px; color: #075e54; }
                     if root.creating-profile: Text { text: root.locale.create-profile; font-size: 28px; color: #075e54; }
-                    if !root.creating-profile: Text { text: root.locale.unlock-help; color: #667781; wrap: word-wrap; }
-                    if root.creating-profile: Text { text: root.locale.create-help; color: #667781; wrap: word-wrap; }
+                    if !root.creating-profile: Text { text: root.locale.unlock-help; color: root.secondary-text; wrap: word-wrap; }
+                    if root.creating-profile: Text { text: root.locale.create-help; color: root.secondary-text; wrap: word-wrap; }
                     if !root.creating-profile: ComboBox {
                         model: root.available-profiles;
                         selected(value) => { root.selected-profile = value; root.select-profile(value); }
@@ -610,12 +625,12 @@ export component MainWindow inherits Window {
                         clicked => { root.initialize-profile(root.creating-profile ? display_name.text : root.selected-profile, password.text, root.creating-profile ? password_confirm.text : password.text); }
                     }
                     AppButton { label: root.creating-profile ? root.locale.back-to-profiles : root.locale.create-new-profile; clicked => { root.begin-create-profile(); } }
-                    if root.fingerprint == "": Text { text: root.status-text; color: #667781; wrap: word-wrap; }
+                    if root.fingerprint == "": Text { text: root.status-text; color: root.secondary-text; wrap: word-wrap; }
                     if root.fingerprint != "": TouchArea {
                         width: 480px;
                         height: 56px;
                         clicked => { root.copy-fingerprint(); }
-                        Text { text: root.locale.fingerprint + ": " + root.fingerprint; color: #667781; wrap: char-wrap; width: 480px; horizontal-alignment: center; }
+                        Text { text: root.locale.fingerprint + ": " + root.fingerprint; color: root.secondary-text; wrap: char-wrap; width: 480px; horizontal-alignment: center; }
                     }
                 }
             }
@@ -630,22 +645,22 @@ export component MainWindow inherits Window {
                 y: (parent.height - self.height) / 2;
                 width: 480px;
                 height: 300px;
-                background: white;
+                background: root.elevated-background;
                 border-radius: 16px;
                 border-width: 1px;
-                border-color: #dce6e2;
+                border-color: root.input-border;
                 VerticalBox {
                     padding: 28px;
                     spacing: 14px;
                     Text { text: root.locale.my-profile; font-size: 26px; color: #075e54; }
-                    Text { text: root.locale.your-fingerprint; color: #667781; }
+                    Text { text: root.locale.your-fingerprint; color: root.secondary-text; }
                     TouchArea {
                         width: 424px;
                         height: 64px;
                         clicked => { root.copy-fingerprint(); }
-                        Text { text: root.fingerprint; font-size: 20px; color: #1f2933; wrap: char-wrap; width: 424px; horizontal-alignment: center; }
+                        Text { text: root.fingerprint; font-size: 20px; color: root.primary-text; wrap: char-wrap; width: 424px; horizontal-alignment: center; }
                     }
-                    Text { text: root.locale.share-bundle; color: #667781; wrap: word-wrap; }
+                    Text { text: root.locale.share-bundle; color: root.secondary-text; wrap: word-wrap; }
                     HorizontalBox {
                         spacing: 8px;
                         AppButton { label: root.locale.copy-bundle; primary: true; clicked => { root.copy-bundle(); } }
