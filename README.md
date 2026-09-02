@@ -95,6 +95,18 @@ docker compose run --rm rust-dev cargo test --locked
 docker compose run --rm rust-dev cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
+Run the local release preflight before creating a release tag:
+
+```sh
+./scripts/release-check.sh
+```
+
+It builds and tests the release binaries, validates locale files and Linux
+archive contents, and checks local Flatpak prerequisites when Flatpak tooling
+is installed. GitHub Actions also runs Linux, Windows, and Flatpak validation
+on pushes to `main` and pull requests; the tag workflow is reserved for
+publishing releases.
+
 Build a standalone Linux binary:
 
 ```sh
