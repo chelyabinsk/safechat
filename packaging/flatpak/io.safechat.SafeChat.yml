@@ -19,13 +19,20 @@ modules:
       build-args:
         - --share=network
       append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        PROTOC: /app/bin/protoc
     build-commands:
+      - install -Dm755 protoc/bin/protoc /app/bin/protoc
       - cargo build --release --locked --manifest-path codebase/Cargo.toml -p safechat-slint-ui
       - install -Dm755 codebase/target/release/safechat-slint-ui /app/bin/safechat-slint-ui
       - install -Dm644 codebase/slint-ui/locales/en.json /app/bin/locales/en.json
       - install -Dm644 codebase/slint-ui/locales/ru.json /app/bin/locales/ru.json
       - install -Dm644 packaging/flatpak/io.safechat.SafeChat.desktop /app/share/applications/io.safechat.SafeChat.desktop
     sources:
+      - type: archive
+        url: https://github.com/protocolbuffers/protobuf/releases/download/v35.0/protoc-35.0-linux-x86_64.zip
+        sha256: a45cda0989c17dd950db55f6fbe1e5814c50fda08e87aa422980ac1f89dddbbc
+        dest: protoc
       - type: dir
         path: ../..
         skip:
