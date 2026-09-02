@@ -5895,6 +5895,8 @@ dependencies = [
  "safechat-application",
  "safechat-core",
  "safechat-transports",
+ "serde",
+ "serde_json",
  "slint",
  "slint-build",
 ]

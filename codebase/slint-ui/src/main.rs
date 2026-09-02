@@ -230,7 +230,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let window = MainWindow::new()?;
     configure_window(&window);
-    window.set_locale(localization::ui_text(&cli.language));
+    let locale = localization::load(&cli.language)
+        .map_err(|error| slint::PlatformError::Other(error.to_string()))?;
+    window.set_locale(locale);
     let service = Arc::new(UiService::new_with_debug(cli.debug));
     let profiles = service
         .available_profiles()

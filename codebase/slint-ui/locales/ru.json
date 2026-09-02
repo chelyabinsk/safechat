@@ -1,0 +1,17 @@
+{
+  "my_profile": "Мой профиль", "ready": "Готово", "conversations": "Чаты",
+  "search_conversations": "Поиск чатов", "new_conversation": "Новый чат",
+  "verified_contact": "Проверенный контакт", "no_conversations": "Чатов пока нет",
+  "verified_encrypted": "Проверено · сквозное шифрование", "load_older": "Загрузить старые сообщения",
+  "new_conversation_help": "Обменяйтесь публичными ключами по доверенному каналу и проверьте отпечаток.",
+  "contact_bundle": "Публичный ключ контакта", "contact_fingerprint": "Отпечаток проверенного контакта",
+  "profile_password": "Пароль вашего профиля", "verify_add_contact": "Проверить и добавить контакт",
+  "contact_added": "Контакт добавлен — выберите его, чтобы открыть чат", "select_conversation": "Выберите чат",
+  "type_message": "Введите сообщение", "send": "Отправить", "paste_encrypted": "Вставьте зашифрованное сообщение",
+  "receive_pasted": "Получить вставленное", "unlock": "Разблокировать SafeChat", "create_profile": "Создать профиль SafeChat",
+  "unlock_help": "Выберите профиль и введите пароль.", "create_help": "Создайте отдельную зашифрованную личность для другого пользователя.",
+  "profile_name": "Имя профиля", "password": "Пароль", "confirm_password": "Подтвердите пароль",
+  "create_profile_button": "Создать профиль", "unlock_profile": "Разблокировать профиль", "back_to_profiles": "Назад к профилям",
+  "create_new_profile": "Создать новый профиль", "fingerprint": "Отпечаток", "your_fingerprint": "Ваш отпечаток",
+  "share_bundle": "Передавайте публичный ключ только по доверенному каналу.", "copy_bundle": "Копировать публичный ключ", "close": "Закрыть"
+}

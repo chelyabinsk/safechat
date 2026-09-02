@@ -1,0 +1,17 @@
+{
+  "my_profile": "My profile", "ready": "Ready", "conversations": "Conversations",
+  "search_conversations": "Search conversations", "new_conversation": "New conversation",
+  "verified_contact": "Verified contact", "no_conversations": "No conversations yet",
+  "verified_encrypted": "Verified · end-to-end encrypted", "load_older": "Load older messages",
+  "new_conversation_help": "Exchange public bundles through a trusted channel, then verify the fingerprint.",
+  "contact_bundle": "Contact public bundle", "contact_fingerprint": "Verified contact fingerprint",
+  "profile_password": "Your profile password", "verify_add_contact": "Verify and add contact",
+  "contact_added": "Contact added — select it to open the chat", "select_conversation": "Select a conversation",
+  "type_message": "Type a message", "send": "Send", "paste_encrypted": "Paste encrypted message here",
+  "receive_pasted": "Receive pasted", "unlock": "Unlock SafeChat", "create_profile": "Create a SafeChat profile",
+  "unlock_help": "Select a profile and enter its password.", "create_help": "Create a separate encrypted identity for another user.",
+  "profile_name": "Profile name", "password": "Password", "confirm_password": "Confirm password",
+  "create_profile_button": "Create profile", "unlock_profile": "Unlock profile", "back_to_profiles": "Back to profiles",
+  "create_new_profile": "Create new profile", "fingerprint": "Fingerprint", "your_fingerprint": "Your fingerprint",
+  "share_bundle": "Share the public bundle only through a trusted channel.", "copy_bundle": "Copy public bundle", "close": "Close"
+}
