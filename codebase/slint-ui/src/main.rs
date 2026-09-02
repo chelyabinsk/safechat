@@ -20,6 +20,15 @@ struct Cli {
     headless: bool,
 }
 
+const WINDOW_WIDTH: f32 = 1080.0;
+const WINDOW_HEIGHT: f32 = 720.0;
+
+fn configure_window(window: &MainWindow) {
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+}
+
 fn format_timestamp(timestamp: u64) -> String {
     let Ok(timestamp) = i64::try_from(timestamp) else {
         return timestamp.to_string();
@@ -215,6 +224,7 @@ fn main() -> Result<(), slint::PlatformError> {
         eprintln!("safechat debug: GUI starting");
     }
     let window = MainWindow::new()?;
+    configure_window(&window);
     let service = Arc::new(UiService::new_with_debug(cli.debug));
     let profiles = service
         .available_profiles()
