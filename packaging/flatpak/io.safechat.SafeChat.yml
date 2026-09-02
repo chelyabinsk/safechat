@@ -32,7 +32,6 @@ modules:
       - type: archive
         url: https://github.com/protocolbuffers/protobuf/releases/download/v35.0/protoc-35.0-linux-x86_64.zip
         sha256: a45cda0989c17dd950db55f6fbe1e5814c50fda08e87aa422980ac1f89dddbbc
-        dest: protoc
       - type: dir
         path: ../..
         skip:
