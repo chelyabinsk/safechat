@@ -202,7 +202,7 @@ jobs:
             packaging/flatpak/io.safechat.SafeChat.yml
           flatpak build-bundle packaging/flatpak/repo \
             packaging/flatpak/dist/safechat-${GITHUB_REF_NAME}.flatpak \
-            io.safechat.SafeChat stable
+            io.safechat.SafeChat master
 
       - name: Upload Flatpak bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
