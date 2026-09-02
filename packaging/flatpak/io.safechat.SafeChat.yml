@@ -22,6 +22,8 @@ modules:
     build-commands:
       - cargo build --release --locked --manifest-path codebase/Cargo.toml -p safechat-slint-ui
       - install -Dm755 codebase/target/release/safechat-slint-ui /app/bin/safechat-slint-ui
+      - install -Dm644 codebase/slint-ui/locales/en.json /app/bin/locales/en.json
+      - install -Dm644 codebase/slint-ui/locales/ru.json /app/bin/locales/ru.json
       - install -Dm644 packaging/flatpak/io.safechat.SafeChat.desktop /app/share/applications/io.safechat.SafeChat.desktop
     sources:
       - type: dir

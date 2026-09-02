@@ -79,6 +79,24 @@ jobs:
         working-directory: codebase
         run: cargo build --release --locked --target ${{ matrix.target }} -p safechat-slint-ui
 
+      - name: Bundle Windows runtime libraries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:GITHUB_WORKSPACE 'codebase\target\${{ matrix.target }}\release'
+          $dlls = Get-ChildItem (Join-Path $env:OPENSSL_DIR 'bin') -Filter '*.dll'
+          if (-not $dlls) {
+            throw 'Could not find the OpenSSL runtime DLLs'
+          }
+          Copy-Item $dlls.FullName $release -Force
+
+      - name: Bundle UI locale files
+        shell: bash
+        working-directory: codebase
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cp -R slint-ui/locales "target/${TARGET}/release/locales"
+
       - name: Package binary
         shell: bash
         working-directory: codebase
@@ -91,10 +109,13 @@ jobs:
             7z a "dist/safechat-${TARGET}.zip" \
               "target/${TARGET}/release/safechat.exe" \
               "target/${TARGET}/release/safechat-ui.exe" \
-              "target/${TARGET}/release/safechat-slint-ui.exe"
+              "target/${TARGET}/release/safechat-slint-ui.exe" \
+              "target/${TARGET}/release/locales" \
+              "target/${TARGET}/release/*.dll"
           else
             tar -czf "dist/safechat-${TARGET}.tar.gz" \
-              -C "target/${TARGET}/release" safechat safechat-ui safechat-slint-ui
+              -C "target/${TARGET}/release" \
+              safechat safechat-ui safechat-slint-ui locales
           fi
 
       - name: Upload packaged binary
