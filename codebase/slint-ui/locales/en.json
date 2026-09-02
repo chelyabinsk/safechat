@@ -15,5 +15,5 @@
   "create_profile_button": "Create profile", "unlock_profile": "Unlock profile", "back_to_profiles": "Back to profiles",
   "create_new_profile": "Create new profile", "fingerprint": "Fingerprint", "your_fingerprint": "Your fingerprint",
   "share_bundle": "Share the public bundle only through a trusted channel.", "copy_bundle": "Copy public bundle", "close": "Close",
-  "you": "You", "today": "Today", "yesterday": "Yesterday", "copied": "Copied", "chat_history_loaded": "Chat history loaded.", "sent": "sent", "received": "received", "decrypting_chat_history": "Decrypting chat history…", "encrypting_sending": "Encrypting and sending…", "decrypting_pasted": "Decrypting pasted message…", "copy_paste": "Copy/paste", "relay": "Relay"
+  "you": "You", "today": "Today", "yesterday": "Yesterday", "copied": "Copied", "chat_history_loaded": "Chat history loaded.", "sent": "sent", "received": "received", "decrypting_chat_history": "Decrypting chat history…", "encrypting_sending": "Encrypting and sending…", "decrypting_pasted": "Decrypting pasted message…", "copy_paste": "Copy/paste", "relay": "Relay", "language_english": "English", "language_russian": "Русский"
 }

@@ -73,6 +73,34 @@ pub(super) fn profile_database(profile: &str) -> Result<PathBuf> {
     Ok(root.join("identity.db"))
 }
 
+pub(super) fn load_language(profile: &str) -> Result<Option<String>> {
+    let database = profile_database(profile)?;
+    let path = database
+        .parent()
+        .context("profile database has no parent directory")?
+        .join("preferences.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let contents = std::fs::read_to_string(path)?;
+    let preferences: serde_json::Value = serde_json::from_str(&contents)?;
+    Ok(preferences
+        .get("language")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned))
+}
+
+pub(super) fn save_language(profile: &str, language: &str) -> Result<()> {
+    let database = profile_database(profile)?;
+    let path = database
+        .parent()
+        .context("profile database has no parent directory")?
+        .join("preferences.json");
+    let contents = serde_json::json!({ "language": language }).to_string();
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
 pub(super) fn validate_profile_name(profile: &str) -> Result<&str> {
     let profile = profile.trim();
     if profile.is_empty()

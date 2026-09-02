@@ -5,7 +5,9 @@ mod localization;
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use clap::Parser;
 use safechat_slint_ui::ui_service;
-use safechat_slint_ui::ui_service::{Command, Event, UiService, UiState};
+use safechat_slint_ui::ui_service::{
+    Command, Event, UiService, UiState, load_profile_language, save_profile_language,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -21,8 +23,8 @@ struct Cli {
     #[arg(long)]
     headless: bool,
     /// UI language (`en` or `ru`).
-    #[arg(long, default_value = "en")]
-    language: String,
+    #[arg(long)]
+    language: Option<String>,
 }
 
 const WINDOW_WIDTH: f32 = 1080.0;
@@ -68,6 +70,7 @@ fn to_slint_message(message: ui_service::ConversationMessage, locale: &UiText) -
         status: match message.status.as_str() {
             "sent" => locale.sent.clone(),
             "received" => locale.received.clone(),
+            "copied" | "Copied" => locale.copied.clone(),
             _ => message.status.into(),
         }
         .into(),
@@ -259,14 +262,23 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let window = MainWindow::new()?;
     configure_window(&window);
-    let locale = localization::load(&cli.language)
-        .map_err(|error| slint::PlatformError::Other(error.to_string()))?;
-    window.set_locale(locale);
     let service = Arc::new(UiService::new_with_debug(cli.debug));
     let profiles = service
         .available_profiles()
         .map_err(|error| slint::PlatformError::Other(error.to_string()))?;
     let transport_options = service.transport_options();
+    let initial_language = cli
+        .language
+        .clone()
+        .or_else(|| {
+            profiles
+                .first()
+                .and_then(|profile| load_profile_language(profile).ok().flatten())
+        })
+        .unwrap_or_else(|| "en".to_owned());
+    let locale = localization::load(&initial_language)
+        .map_err(|error| slint::PlatformError::Other(error.to_string()))?;
+    window.set_locale(locale.clone());
     if cli.debug {
         eprintln!(
             "safechat debug: loaded {} profiles; transports={:?}",
@@ -275,8 +287,50 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
     let state = Rc::new(RefCell::new(UiState::from_profiles(profiles)));
-    state.borrow_mut().language = cli.language.clone();
+    state.borrow_mut().language = initial_language.clone();
+    window.set_selected_language(if initial_language.eq_ignore_ascii_case("ru") {
+        "ru".into()
+    } else {
+        "en".into()
+    });
     render_state(&window, &state.borrow(), &transport_options);
+
+    let window_weak = window.as_weak();
+    let state_for_language = Rc::clone(&state);
+    let options_for_language = transport_options.clone();
+    let debug_for_language = cli.debug;
+    window.on_choose_language(move |label| {
+        let current_language = state_for_language.borrow().language.clone();
+        let language = label.to_string();
+        if language != "en" && language != "ru" {
+            if debug_for_language {
+                eprintln!("safechat debug: unknown language selection: {label}");
+            }
+            return;
+        }
+        if language == current_language {
+            return;
+        }
+        let Ok(locale) = localization::load(&language) else {
+            if debug_for_language {
+                eprintln!("safechat debug: failed to load selected language: {language}");
+            }
+            return;
+        };
+        if debug_for_language {
+            eprintln!("safechat debug: switching language {current_language} -> {language}");
+        }
+        let profile = state_for_language.borrow().selected_profile.clone();
+        if !profile.is_empty() {
+            let _ = save_profile_language(&profile, &language);
+        }
+        state_for_language.borrow_mut().language = language.clone();
+        if let Some(window) = window_weak.upgrade() {
+            window.set_locale(locale.clone());
+            window.set_selected_language(language.clone().into());
+            render_state(&window, &state_for_language.borrow(), &options_for_language);
+        }
+    });
 
     let window_weak = window.as_weak();
     let service_for_initialize = Arc::clone(&service);
@@ -316,6 +370,13 @@ fn main() -> Result<(), slint::PlatformError> {
         state.profile_exists = true;
         state.status = format!("Selected profile: {profile}");
         if let Some(window) = window_weak.upgrade() {
+            if let Ok(Some(language)) = load_profile_language(profile.as_str()) {
+                if let Ok(locale) = localization::load(&language) {
+                    state.language = language.clone();
+                    window.set_locale(locale);
+                    window.set_selected_language(language.into());
+                }
+            }
             render_state(&window, &state, &options_for_select_profile);
         }
     });

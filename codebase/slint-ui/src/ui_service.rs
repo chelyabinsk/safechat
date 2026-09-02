@@ -23,6 +23,14 @@ pub use ports::ServicePorts;
 pub use state::UiState;
 pub use worker::UiService;
 
+pub fn load_profile_language(profile: &str) -> anyhow::Result<Option<String>> {
+    profile::load_language(profile)
+}
+
+pub fn save_profile_language(profile: &str, language: &str) -> anyhow::Result<()> {
+    profile::save_language(profile, language)
+}
+
 #[derive(Clone, Debug)]
 pub struct ProfileSession {
     pub(super) profile: String,

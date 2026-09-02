@@ -15,5 +15,5 @@
   "create_profile_button": "Создать профиль", "unlock_profile": "Разблокировать профиль", "back_to_profiles": "Назад к профилям",
   "create_new_profile": "Создать новый профиль", "fingerprint": "Отпечаток", "your_fingerprint": "Ваш отпечаток",
   "share_bundle": "Передавайте публичный ключ только по доверенному каналу.", "copy_bundle": "Копировать публичный ключ", "close": "Закрыть",
-  "you": "Вы", "today": "Сегодня", "yesterday": "Вчера", "copied": "Скопировано", "chat_history_loaded": "История чата загружена.", "sent": "отправлено", "received": "получено", "decrypting_chat_history": "Расшифровка истории чата…", "encrypting_sending": "Шифрование и отправка…", "decrypting_pasted": "Расшифровка вставленного сообщения…", "copy_paste": "Копирование/вставка", "relay": "Ретранслятор"
+  "you": "Вы", "today": "Сегодня", "yesterday": "Вчера", "copied": "Скопировано", "chat_history_loaded": "История чата загружена.", "sent": "отправлено", "received": "получено", "decrypting_chat_history": "Расшифровка истории чата…", "encrypting_sending": "Шифрование и отправка…", "decrypting_pasted": "Расшифровка вставленного сообщения…", "copy_paste": "Копирование/вставка", "relay": "Ретранслятор", "language_english": "English", "language_russian": "Русский"
 }

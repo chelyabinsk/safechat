@@ -57,6 +57,8 @@ struct LocaleFile {
     decrypting_pasted: String,
     copy_paste: String,
     relay: String,
+    language_english: String,
+    language_russian: String,
 }
 
 fn status_key(status: &str) -> Option<(&str, &str)> {
@@ -75,7 +77,9 @@ fn status_key(status: &str) -> Option<(&str, &str)> {
         "Add and select a contact first." => "add_contact_first",
         "Type a message first." => "type_message_first",
         "Paste an encrypted message first." => "paste_encrypted_first",
-        "Ciphertext copied to clipboard."
+        "copied"
+        | "Copied"
+        | "Ciphertext copied to clipboard."
         | "Public bundle copied to clipboard."
         | "Fingerprint copied to clipboard." => "copied",
         _ => return None,
@@ -191,6 +195,8 @@ impl From<LocaleFile> for UiText {
             decrypting_pasted: value.decrypting_pasted.into(),
             copy_paste: value.copy_paste.into(),
             relay: value.relay.into(),
+            language_english: value.language_english.into(),
+            language_russian: value.language_russian.into(),
         }
     }
 }
@@ -266,6 +272,7 @@ mod tests {
             status_text("Chat history loaded.", "ru"),
             "История чата загружена."
         );
+        assert_eq!(status_text("copied", "ru"), "Скопировано");
         assert_eq!(
             status_text("Could not send message: timeout", "ru"),
             "Не удалось отправить сообщение: timeout"
