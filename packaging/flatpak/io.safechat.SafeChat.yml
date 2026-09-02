@@ -22,7 +22,7 @@ modules:
       env:
         PROTOC: /app/bin/protoc
     build-commands:
-      - install -Dm755 protoc/bin/protoc /app/bin/protoc
+      - install -Dm755 bin/protoc /app/bin/protoc
       - cargo build --release --locked --manifest-path codebase/Cargo.toml -p safechat-slint-ui
       - install -Dm755 codebase/target/release/safechat-slint-ui /app/bin/safechat-slint-ui
       - install -Dm644 codebase/slint-ui/locales/en.json /app/bin/locales/en.json
