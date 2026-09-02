@@ -4,6 +4,7 @@ use super::{Command, ConversationMessage, Event, TransportKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiState {
+    pub language: String,
     pub status: String,
     pub profiles: Vec<String>,
     pub profile_name: String,
@@ -34,6 +35,7 @@ impl UiState {
     pub fn from_profiles(profiles: Vec<String>) -> Self {
         let selected_profile = profiles.first().cloned().unwrap_or_default();
         Self {
+            language: "en".to_owned(),
             status: "Ready".to_owned(),
             profile_exists: !selected_profile.is_empty(),
             creating_profile: selected_profile.is_empty(),

@@ -72,6 +72,18 @@ export struct UiText {
     share-bundle: string,
     copy-bundle: string,
     close: string,
+    you: string,
+    today: string,
+    yesterday: string,
+    copied: string,
+    chat-history-loaded: string,
+    sent: string,
+    received: string,
+    decrypting-chat-history: string,
+    encrypting-sending: string,
+    decrypting-pasted: string,
+    copy-paste: string,
+    relay: string,
 }
 
 export component MainWindow inherits Window {
@@ -296,7 +308,7 @@ export component MainWindow inherits Window {
                             }
                             AppButton { label: root.locale.send; primary: true; width: 84px; height: 40px; enabled: root.profile-ready; clicked => { root.send-message(message_input.text); message_input.text = ""; } }
                         }
-                        if root.conversation-selected && !root.new-chat-open && !root.chat-loading && root.selected-transport == "Copy/paste": HorizontalBox {
+                        if root.conversation-selected && !root.new-chat-open && !root.chat-loading && root.selected-transport == root.locale.copy-paste: HorizontalBox {
                             height: 40px;
                             paste_input := LineEdit {
                                 placeholder-text: root.locale.paste-encrypted;

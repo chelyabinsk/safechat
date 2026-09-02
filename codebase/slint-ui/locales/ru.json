@@ -1,4 +1,5 @@
 {
+  "statuses": {"ready": "Готово", "chat_history_loaded": "История чата загружена.", "unlocking_profile": "Разблокировка зашифрованного профиля…", "verifying_contact": "Проверка контакта…", "profile_ready": "Профиль готов. Проверьте отпечатки через отдельный доверенный канал.", "conversation_selected": "Чат выбран.", "message_sent": "Сообщение отправлено.", "encrypted_ready": "Зашифрованное сообщение готово. Нажмите на сообщение, чтобы скопировать шифротекст.", "encrypted_received": "Зашифрованное сообщение получено.", "new_message_received": "Получено новое сообщение.", "chat_up_to_date": "Чат обновлён.", "add_contact_first": "Сначала добавьте и выберите контакт.", "type_message_first": "Сначала введите сообщение.", "paste_encrypted_first": "Вставьте зашифрованное сообщение.", "copied": "Скопировано", "setup_failed": "Не удалось выполнить настройку: ", "contact_verification_failed": "Не удалось проверить контакт: ", "could_not_open_chat": "Не удалось открыть чат: ", "could_not_load_older": "Не удалось загрузить старые сообщения: ", "could_not_send": "Не удалось отправить сообщение: ", "could_not_receive": "Не удалось получить сообщение: ", "could_not_copy": "Не удалось скопировать в буфер обмена: ", "selected_transport": "Выбран транспорт: ", "verified_and_added": "Проверено и добавлено "},
   "my_profile": "Мой профиль", "ready": "Готово", "conversations": "Чаты",
   "search_conversations": "Поиск чатов", "new_conversation": "Новый чат",
   "verified_contact": "Проверенный контакт", "no_conversations": "Чатов пока нет",
@@ -13,5 +14,6 @@
   "profile_name": "Имя профиля", "password": "Пароль", "confirm_password": "Подтвердите пароль",
   "create_profile_button": "Создать профиль", "unlock_profile": "Разблокировать профиль", "back_to_profiles": "Назад к профилям",
   "create_new_profile": "Создать новый профиль", "fingerprint": "Отпечаток", "your_fingerprint": "Ваш отпечаток",
-  "share_bundle": "Передавайте публичный ключ только по доверенному каналу.", "copy_bundle": "Копировать публичный ключ", "close": "Закрыть"
+  "share_bundle": "Передавайте публичный ключ только по доверенному каналу.", "copy_bundle": "Копировать публичный ключ", "close": "Закрыть",
+  "you": "Вы", "today": "Сегодня", "yesterday": "Вчера", "copied": "Скопировано", "chat_history_loaded": "История чата загружена.", "sent": "отправлено", "received": "получено", "decrypting_chat_history": "Расшифровка истории чата…", "encrypting_sending": "Шифрование и отправка…", "decrypting_pasted": "Расшифровка вставленного сообщения…", "copy_paste": "Копирование/вставка", "relay": "Ретранслятор"
 }

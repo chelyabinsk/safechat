@@ -34,7 +34,7 @@ fn configure_window(window: &MainWindow) {
         .set_size(slint::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
 }
 
-fn format_timestamp(timestamp: u64) -> String {
+fn format_timestamp(timestamp: u64, locale: &UiText) -> String {
     let Ok(timestamp) = i64::try_from(timestamp) else {
         return timestamp.to_string();
     };
@@ -46,27 +46,48 @@ fn format_timestamp(timestamp: u64) -> String {
     let today = now.date_naive();
     let date = local_time.date_naive();
     if date == today {
-        format!("Today, {}", local_time.format("%H:%M"))
+        format!("{}, {}", locale.today, local_time.format("%H:%M"))
     } else if date == (now - TimeDelta::days(1)).date_naive() {
-        format!("Yesterday, {}", local_time.format("%H:%M"))
+        format!("{}, {}", locale.yesterday, local_time.format("%H:%M"))
     } else {
         local_time.format("%Y-%m-%d %H:%M").to_string()
     }
 }
 
-fn to_slint_message(message: ui_service::ConversationMessage) -> ChatMessage {
+fn to_slint_message(message: ui_service::ConversationMessage, locale: &UiText) -> ChatMessage {
     ChatMessage {
-        sender: message.sender.into(),
+        sender: if message.outgoing {
+            locale.you.clone()
+        } else {
+            message.sender.into()
+        }
+        .into(),
         text: message.text.into(),
-        timestamp: format_timestamp(message.timestamp).into(),
+        timestamp: format_timestamp(message.timestamp, locale).into(),
         outgoing: message.outgoing,
-        status: message.status.into(),
+        status: match message.status.as_str() {
+            "sent" => locale.sent.clone(),
+            "received" => locale.received.clone(),
+            _ => message.status.into(),
+        }
+        .into(),
         ciphertext: message.ciphertext.into(),
     }
 }
 
+fn localize_loading_text(loading: &str, locale: &UiText) -> String {
+    match loading {
+        "Decrypting chat history…" => locale.decrypting_chat_history.to_string(),
+        "Encrypting and sending…" => locale.encrypting_sending.to_string(),
+        "Decrypting pasted message…" => locale.decrypting_pasted.to_string(),
+        _ => loading.to_owned(),
+    }
+}
+
 fn render_state(window: &MainWindow, state: &UiState, transport_options: &[String]) {
-    window.set_status_text(state.status.clone().into());
+    let locale = localization::load(&state.language)
+        .unwrap_or_else(|_| localization::load("en").expect("English locale must be installed"));
+    window.set_status_text(localization::status_text(&state.status, &state.language).into());
     window.set_available_profiles(slint::ModelRc::new(slint::VecModel::from(
         state
             .profiles
@@ -78,7 +99,8 @@ fn render_state(window: &MainWindow, state: &UiState, transport_options: &[Strin
     window.set_transport_options(slint::ModelRc::new(slint::VecModel::from(
         transport_options
             .iter()
-            .cloned()
+            .filter_map(|option| ui_service::TransportKind::parse(option))
+            .map(|transport| localization::transport_label(transport, &locale))
             .map(slint::SharedString::from)
             .collect::<Vec<_>>(),
     )));
@@ -95,18 +117,20 @@ fn render_state(window: &MainWindow, state: &UiState, transport_options: &[Strin
     window.set_conversation_selected(state.conversation_selected);
     window.set_chat_loading(state.chat_loading);
     window.set_history_loading(state.history_loading);
-    window.set_loading_text(state.loading_text.clone().into());
+    window.set_loading_text(localize_loading_text(&state.loading_text, &locale).into());
     window.set_new_chat_open(state.new_chat_open);
     window.set_profile_info_open(state.profile_info_open);
     window.set_history_has_more(state.history_has_more);
     window.set_scroll_generation(state.scroll_generation);
-    window.set_selected_transport(state.selected_transport.to_string().into());
+    window.set_selected_transport(
+        localization::transport_label(state.selected_transport, &locale).into(),
+    );
     window.set_chat_messages(slint::ModelRc::new(slint::VecModel::from(
         state
             .messages
             .clone()
             .into_iter()
-            .map(to_slint_message)
+            .map(|message| to_slint_message(message, &locale))
             .collect::<Vec<_>>(),
     )));
 }
@@ -204,7 +228,12 @@ fn run_headless_smoke_test(debug: bool) -> Result<(), String> {
         .messages
         .iter()
         .cloned()
-        .map(to_slint_message)
+        .map(|message| {
+            to_slint_message(
+                message,
+                &localization::load("en").expect("English locale must be installed"),
+            )
+        })
         .collect::<Vec<_>>();
     if projected.len() != 10 || projected[9].text != "headless message 9" {
         return Err("chat message model projection failed".to_owned());
@@ -246,6 +275,7 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
     let state = Rc::new(RefCell::new(UiState::from_profiles(profiles)));
+    state.borrow_mut().language = cli.language.clone();
     render_state(&window, &state.borrow(), &transport_options);
 
     let window_weak = window.as_weak();
@@ -389,11 +419,12 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let window_weak = window.as_weak();
-    let service_for_transport = Arc::clone(&service);
     let state_for_transport = Rc::clone(&state);
     let options_for_transport = transport_options.clone();
     window.on_choose_transport(move |transport| {
-        if let Some(transport) = service_for_transport.parse_transport(transport.as_str()) {
+        let language = state_for_transport.borrow().language.clone();
+        if let Some(transport) = localization::parse_transport_label(transport.as_str(), &language)
+        {
             state_for_transport.borrow_mut().select_transport(transport);
             if let Some(window) = window_weak.upgrade() {
                 render_state(
@@ -495,8 +526,18 @@ fn main() -> Result<(), slint::PlatformError> {
             Err(error) => format!("Could not copy to clipboard: {error}"),
         };
         state_for_copy.borrow_mut().status = status;
+        let locale = localization::load(&state_for_copy.borrow().language)
+            .expect("selected locale must be available");
+        let copied_status = locale.copied.clone();
+        let ready_status = locale.ready.clone();
         if let Some(window) = window_weak.upgrade() {
-            window.set_status_text(state_for_copy.borrow().status.clone().into());
+            window.set_status_text(
+                localization::status_text(
+                    &state_for_copy.borrow().status,
+                    &state_for_copy.borrow().language,
+                )
+                .into(),
+            );
         }
         let timer_window = window_weak.clone();
         copy_feedback_timer.start(
@@ -505,8 +546,8 @@ fn main() -> Result<(), slint::PlatformError> {
             move || {
                 if let Some(window) = timer_window.upgrade() {
                     window.set_copied_ciphertext("".into());
-                    if window.get_status_text() == "Ciphertext copied to clipboard." {
-                        window.set_status_text("Ready".into());
+                    if window.get_status_text() == copied_status {
+                        window.set_status_text(ready_status.clone().into());
                     }
                 }
             },
@@ -614,18 +655,22 @@ fn main() -> Result<(), slint::PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::to_slint_message;
+    use crate::localization;
     use crate::ui_service::ConversationMessage;
 
     #[test]
     fn chat_model_projection_preserves_fields_for_the_view() {
-        let message = to_slint_message(ConversationMessage {
-            sender: "Bob".to_owned(),
-            text: "A long message".to_owned(),
-            timestamp: 42,
-            outgoing: false,
-            status: "received".to_owned(),
-            ciphertext: "encrypted".to_owned(),
-        });
+        let message = to_slint_message(
+            ConversationMessage {
+                sender: "Bob".to_owned(),
+                text: "A long message".to_owned(),
+                timestamp: 42,
+                outgoing: false,
+                status: "received".to_owned(),
+                ciphertext: "encrypted".to_owned(),
+            },
+            &localization::load("en").unwrap(),
+        );
 
         assert_eq!(message.sender.to_string(), "Bob");
         assert_eq!(message.text.to_string(), "A long message");

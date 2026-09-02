@@ -1,12 +1,14 @@
 use crate::UiText;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LocaleFile {
+    statuses: HashMap<String, String>,
     my_profile: String,
     ready: String,
     conversations: String,
@@ -43,6 +45,99 @@ struct LocaleFile {
     share_bundle: String,
     copy_bundle: String,
     close: String,
+    you: String,
+    today: String,
+    yesterday: String,
+    copied: String,
+    chat_history_loaded: String,
+    sent: String,
+    received: String,
+    decrypting_chat_history: String,
+    encrypting_sending: String,
+    decrypting_pasted: String,
+    copy_paste: String,
+    relay: String,
+}
+
+fn status_key(status: &str) -> Option<(&str, &str)> {
+    let exact = match status {
+        "Ready" => "ready",
+        "Chat history loaded." => "chat_history_loaded",
+        "Unlocking encrypted profile…" => "unlocking_profile",
+        "Verifying contact…" => "verifying_contact",
+        "Profile ready. Verify fingerprints through a separate trusted channel." => "profile_ready",
+        "Conversation selected." => "conversation_selected",
+        "Message sent." => "message_sent",
+        "Encrypted message ready. Click the message to copy its ciphertext." => "encrypted_ready",
+        "Encrypted message received." => "encrypted_received",
+        "New message received." => "new_message_received",
+        "Chat is up to date." => "chat_up_to_date",
+        "Add and select a contact first." => "add_contact_first",
+        "Type a message first." => "type_message_first",
+        "Paste an encrypted message first." => "paste_encrypted_first",
+        "Ciphertext copied to clipboard."
+        | "Public bundle copied to clipboard."
+        | "Fingerprint copied to clipboard." => "copied",
+        _ => return None,
+    };
+    Some((exact, ""))
+}
+
+/// Translate a runtime status while leaving service-provided error details intact.
+pub fn status_text(status: &str, language: &str) -> String {
+    let locale = load_file(language).or_else(|_| load_file("en"));
+    let Ok(locale) = locale else {
+        return status.to_owned();
+    };
+    if let Some((key, _suffix)) = status_key(status) {
+        return locale
+            .statuses
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| status.to_owned());
+    }
+    for (prefix, key) in [
+        ("Setup failed: ", "setup_failed"),
+        (
+            "Contact verification failed: ",
+            "contact_verification_failed",
+        ),
+        ("Could not open chat: ", "could_not_open_chat"),
+        ("Could not load older messages: ", "could_not_load_older"),
+        ("Could not send message: ", "could_not_send"),
+        ("Could not receive message: ", "could_not_receive"),
+        ("Could not copy to clipboard: ", "could_not_copy"),
+        ("Selected transport: ", "selected_transport"),
+        ("Verified and added ", "verified_and_added"),
+    ] {
+        if let Some(detail) = status.strip_prefix(prefix) {
+            if let Some(template) = locale.statuses.get(key) {
+                return format!("{template}{detail}");
+            }
+        }
+    }
+    status.to_owned()
+}
+
+pub fn transport_label(transport: crate::ui_service::TransportKind, locale: &UiText) -> String {
+    match transport {
+        crate::ui_service::TransportKind::CopyPaste => locale.copy_paste.to_string(),
+        crate::ui_service::TransportKind::Relay => locale.relay.to_string(),
+    }
+}
+
+pub fn parse_transport_label(
+    label: &str,
+    language: &str,
+) -> Option<crate::ui_service::TransportKind> {
+    let locale = load(language).ok()?;
+    if locale.copy_paste == label {
+        Some(crate::ui_service::TransportKind::CopyPaste)
+    } else if locale.relay == label {
+        Some(crate::ui_service::TransportKind::Relay)
+    } else {
+        None
+    }
 }
 
 impl From<LocaleFile> for UiText {
@@ -84,6 +179,18 @@ impl From<LocaleFile> for UiText {
             share_bundle: value.share_bundle.into(),
             copy_bundle: value.copy_bundle.into(),
             close: value.close.into(),
+            you: value.you.into(),
+            today: value.today.into(),
+            yesterday: value.yesterday.into(),
+            copied: value.copied.into(),
+            chat_history_loaded: value.chat_history_loaded.into(),
+            sent: value.sent.into(),
+            received: value.received.into(),
+            decrypting_chat_history: value.decrypting_chat_history.into(),
+            encrypting_sending: value.encrypting_sending.into(),
+            decrypting_pasted: value.decrypting_pasted.into(),
+            copy_paste: value.copy_paste.into(),
+            relay: value.relay.into(),
         }
     }
 }
@@ -108,6 +215,17 @@ fn locale_paths(language: &str) -> Vec<PathBuf> {
     paths
 }
 
+fn load_file(language: &str) -> Result<LocaleFile> {
+    let path = locale_paths(language)
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| anyhow!("locale not found"))?;
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("could not read locale file {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("could not parse locale file {}", path.display()))
+}
+
 fn read_locale(path: &Path) -> Result<UiText> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("could not read locale file {}", path.display()))?;
@@ -129,7 +247,7 @@ pub fn load(language: &str) -> Result<UiText> {
 
 #[cfg(test)]
 mod tests {
-    use super::load;
+    use super::{load, status_text};
 
     #[test]
     fn english_is_the_default_locale() {
@@ -140,5 +258,17 @@ mod tests {
     #[test]
     fn russian_is_loaded_from_an_external_file() {
         assert_eq!(load("ru").unwrap().send, "Отправить");
+    }
+
+    #[test]
+    fn russian_translates_runtime_statuses_and_preserves_error_details() {
+        assert_eq!(
+            status_text("Chat history loaded.", "ru"),
+            "История чата загружена."
+        );
+        assert_eq!(
+            status_text("Could not send message: timeout", "ru"),
+            "Не удалось отправить сообщение: timeout"
+        );
     }
 }
