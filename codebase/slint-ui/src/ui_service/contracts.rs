@@ -18,6 +18,9 @@ pub enum Command {
     LoadHistory {
         peer: String,
     },
+    DeleteHistory {
+        peer: String,
+    },
     LoadOlderHistory {
         peer: String,
         before: usize,
@@ -41,7 +44,9 @@ impl Command {
         match self {
             Self::Initialize { .. } => Operation::Profile,
             Self::VerifyContact { .. } => Operation::Contact,
-            Self::LoadHistory { .. } | Self::LoadOlderHistory { .. } => Operation::History,
+            Self::LoadHistory { .. }
+            | Self::LoadOlderHistory { .. }
+            | Self::DeleteHistory { .. } => Operation::History,
             Self::Send { transport, .. } => {
                 if matches!(transport, super::TransportKind::Relay) {
                     Operation::Relay

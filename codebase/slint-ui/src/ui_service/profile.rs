@@ -59,11 +59,15 @@ pub fn available_profiles() -> Result<Vec<String>> {
     Ok(profiles)
 }
 
-pub(super) fn profile_root() -> Result<PathBuf> {
+pub fn data_directory() -> Result<PathBuf> {
     Ok(ProjectDirs::from("", "SafeChat", "safechat")
         .context("cannot determine the platform data directory")?
         .data_dir()
         .to_path_buf())
+}
+
+pub(super) fn profile_root() -> Result<PathBuf> {
+    data_directory()
 }
 
 pub(super) fn profile_database(profile: &str) -> Result<PathBuf> {

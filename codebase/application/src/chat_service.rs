@@ -242,6 +242,11 @@ mod tests {
             self.saves.push(history.clone());
             Ok(())
         }
+
+        fn delete(&mut self, _conversation: &str) -> Result<()> {
+            self.saves.push(HistoryFile::empty());
+            Ok(())
+        }
     }
 
     struct TestTransport {

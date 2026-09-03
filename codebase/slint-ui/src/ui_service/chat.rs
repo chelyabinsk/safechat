@@ -88,6 +88,12 @@ impl HistoryStorePort for EncryptedHistoryStorage {
         let mut store = EncryptedHistoryStore::new(&lobby_root, password)?;
         store.save(peer, history)
     }
+
+    fn delete(&self, profile: &str, password: &str, peer: &str) -> Result<()> {
+        let (_, _, _, lobby_root) = chat_paths(profile)?;
+        let mut store = EncryptedHistoryStore::new(&lobby_root, password)?;
+        store.delete(peer)
+    }
 }
 
 #[cfg(test)]

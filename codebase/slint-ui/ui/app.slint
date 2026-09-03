@@ -200,6 +200,10 @@ export struct UiText {
     share-bundle: string,
     copy-bundle: string,
     close: string,
+    data-location: string,
+    delete-chat: string,
+    delete-chat-confirmation: string,
+    chat-deleted: string,
     you: string,
     today: string,
     yesterday: string,
@@ -208,6 +212,7 @@ export struct UiText {
     sent: string,
     received: string,
     decrypting-chat-history: string,
+    deleting-chat-history: string,
     encrypting-sending: string,
     decrypting-pasted: string,
     copy-paste: string,
@@ -228,6 +233,7 @@ export component MainWindow inherits Window {
     in property <UiText> locale;
 
     in-out property <string> status-text: "Ready";
+    in-out property <string> app-version: "";
     in-out property <string> profile-name: "default";
     in-out property <bool> profile-exists: false;
     in-out property <[string]> available-profiles: [];
@@ -251,6 +257,8 @@ export component MainWindow inherits Window {
     in-out property <string> public-bundle: "";
     in-out property <bool> new-chat-open: false;
     in-out property <bool> profile-info-open: false;
+    in-out property <string> data-directory: "";
+    in-out property <bool> delete-chat-confirm-open: false;
     in-out property <bool> history-has-more: false;
     in-out property <int> scroll-generation: 0;
     in-out property <string> copied-ciphertext: "";
@@ -283,6 +291,7 @@ export component MainWindow inherits Window {
     callback receive-pasted(string);
     callback copy-ciphertext(string);
     callback load-older-history();
+    callback delete-chat();
 
     Rectangle {
         width: parent.width;
@@ -303,6 +312,7 @@ export component MainWindow inherits Window {
                     padding-right: 22px;
                     spacing: 12px;
                     Text { text: "SafeChat"; color: white; font-size: 25px; font-weight: 600; }
+                    Text { text: root.app-version; color: #9cc8c1; font-size: 11px; vertical-alignment: center; }
                     Rectangle {
                         width: 1px;
                         height: 28px;
@@ -644,7 +654,7 @@ export component MainWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 width: 480px;
-                height: 300px;
+                height: 430px;
                 background: root.elevated-background;
                 border-radius: 16px;
                 border-width: 1px;
@@ -661,10 +671,25 @@ export component MainWindow inherits Window {
                         Text { text: root.fingerprint; font-size: 20px; color: root.primary-text; wrap: char-wrap; width: 424px; horizontal-alignment: center; }
                     }
                     Text { text: root.locale.share-bundle; color: root.secondary-text; wrap: word-wrap; }
+                    Text { text: root.locale.data-location + ":"; color: root.secondary-text; }
+                    Text { text: root.data-directory; color: root.primary-text; wrap: char-wrap; width: 424px; }
+                    if root.conversation-selected && !root.delete-chat-confirm-open: AppButton {
+                        label: root.locale.delete-chat;
+                        clicked => { root.delete-chat-confirm-open = true; }
+                    }
+                    if root.delete-chat-confirm-open: Text {
+                        text: root.locale.delete-chat-confirmation;
+                        color: root.primary-text;
+                    }
+                    if root.delete-chat-confirm-open: HorizontalBox {
+                        spacing: 8px;
+                        AppButton { label: root.locale.delete-chat; primary: true; clicked => { root.delete-chat(); root.delete-chat-confirm-open = false; root.profile-info-open = false; } }
+                        AppButton { label: root.locale.close; clicked => { root.delete-chat-confirm-open = false; } }
+                    }
                     HorizontalBox {
                         spacing: 8px;
                         AppButton { label: root.locale.copy-bundle; primary: true; clicked => { root.copy-bundle(); } }
-                        AppButton { label: root.locale.close; clicked => { root.profile-info-open = false; } }
+                        AppButton { label: root.locale.close; clicked => { root.profile-info-open = false; root.delete-chat-confirm-open = false; } }
                     }
                 }
             }

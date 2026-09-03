@@ -37,6 +37,10 @@ pub struct ProfileSession {
     pub(super) password: String,
 }
 
+pub fn data_directory() -> anyhow::Result<std::path::PathBuf> {
+    profile::data_directory()
+}
+
 pub(super) fn handle_command(
     session: &mut Option<ProfileSession>,
     command: Command,
@@ -45,7 +49,9 @@ pub(super) fn handle_command(
     let operation = match &command {
         Command::Initialize { .. } => Operation::Profile,
         Command::VerifyContact { .. } => Operation::Contact,
-        Command::LoadHistory { .. } | Command::LoadOlderHistory { .. } => Operation::History,
+        Command::LoadHistory { .. }
+        | Command::LoadOlderHistory { .. }
+        | Command::DeleteHistory { .. } => Operation::History,
         Command::Send { transport, .. } => {
             if matches!(transport, TransportKind::Relay) {
                 Operation::Relay
@@ -113,6 +119,21 @@ pub(super) fn handle_command(
                     history_cursor: page.cursor,
                     has_more: page.has_more,
                     prepend: true,
+                })
+            }),
+        Command::DeleteHistory { peer } => require_session(session)
+            .and_then(|active| {
+                ports
+                    .history
+                    .delete(&active.profile, &active.password, &peer)
+            })
+            .map(|()| {
+                Some(Event::ChatUpdated {
+                    messages: Vec::new(),
+                    status: "Chat history deleted.".to_owned(),
+                    history_cursor: 0,
+                    has_more: false,
+                    prepend: false,
                 })
             }),
         Command::Send {

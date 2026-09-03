@@ -162,6 +162,9 @@ impl RelayConfig {
 pub trait HistoryStore {
     fn load(&mut self, conversation: &str) -> Result<HistoryFile>;
     fn save(&mut self, conversation: &str, history: &HistoryFile) -> Result<()>;
+    fn delete(&mut self, conversation: &str) -> Result<()> {
+        self.save(conversation, &HistoryFile::empty())
+    }
 
     /// Loads one page of history. The default preserves compatibility with
     /// existing stores; seekable stores should override this method.
@@ -217,6 +220,14 @@ impl HistoryStore for EncryptedHistoryStore {
 
     fn save(&mut self, conversation: &str, history: &HistoryFile) -> Result<()> {
         save_history_with_identity(&self.path_for(conversation), &self.identity, history)
+    }
+
+    fn delete(&mut self, conversation: &str) -> Result<()> {
+        match fs::remove_file(self.path_for(conversation)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

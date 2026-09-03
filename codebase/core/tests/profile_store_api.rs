@@ -42,6 +42,9 @@ fn encrypted_history_store_public_contract_round_trips_and_pages() {
         .expect("zero-sized request must still make progress");
     assert_eq!(non_empty_page.entries.len(), 1);
 
+    store.delete("peer").expect("delete history");
+    assert!(store.load("peer").expect("load deleted history").entries.is_empty());
+
     std::fs::remove_dir_all(root).expect("clean up test store");
 }
 

@@ -45,6 +45,10 @@ struct LocaleFile {
     share_bundle: String,
     copy_bundle: String,
     close: String,
+    data_location: String,
+    delete_chat: String,
+    delete_chat_confirmation: String,
+    chat_deleted: String,
     you: String,
     today: String,
     yesterday: String,
@@ -53,6 +57,7 @@ struct LocaleFile {
     sent: String,
     received: String,
     decrypting_chat_history: String,
+    deleting_chat_history: String,
     encrypting_sending: String,
     decrypting_pasted: String,
     copy_paste: String,
@@ -65,6 +70,7 @@ fn status_key(status: &str) -> Option<(&str, &str)> {
     let exact = match status {
         "Ready" => "ready",
         "Chat history loaded." => "chat_history_loaded",
+        "Chat history deleted." => "chat_deleted",
         "Unlocking encrypted profile…" => "unlocking_profile",
         "Verifying contact…" => "verifying_contact",
         "Profile ready. Verify fingerprints through a separate trusted channel." => "profile_ready",
@@ -94,6 +100,9 @@ pub fn status_text(status: &str, language: &str) -> String {
         return status.to_owned();
     };
     if let Some((key, _suffix)) = status_key(status) {
+        if key == "chat_deleted" {
+            return locale.chat_deleted;
+        }
         return locale
             .statuses
             .get(key)
@@ -183,6 +192,10 @@ impl From<LocaleFile> for UiText {
             share_bundle: value.share_bundle.into(),
             copy_bundle: value.copy_bundle.into(),
             close: value.close.into(),
+            data_location: value.data_location.into(),
+            delete_chat: value.delete_chat.into(),
+            delete_chat_confirmation: value.delete_chat_confirmation.into(),
+            chat_deleted: value.chat_deleted.into(),
             you: value.you.into(),
             today: value.today.into(),
             yesterday: value.yesterday.into(),
@@ -191,6 +204,7 @@ impl From<LocaleFile> for UiText {
             sent: value.sent.into(),
             received: value.received.into(),
             decrypting_chat_history: value.decrypting_chat_history.into(),
+            deleting_chat_history: value.deleting_chat_history.into(),
             encrypting_sending: value.encrypting_sending.into(),
             decrypting_pasted: value.decrypting_pasted.into(),
             copy_paste: value.copy_paste.into(),

@@ -81,6 +81,12 @@ impl UiState {
                 self.loading_text = "Decrypting chat history…".to_owned();
                 self.status = "Conversation selected.".to_owned();
             }
+            Command::DeleteHistory { .. } => {
+                self.chat_loading = true;
+                self.history_loading = true;
+                self.loading_text = "Deleting chat history…".to_owned();
+                self.status = "Deleting chat history…".to_owned();
+            }
             Command::Send { .. } => {
                 self.chat_loading = true;
                 self.history_loading = false;
@@ -267,5 +273,38 @@ mod tests {
         assert!(!state.chat_loading);
         assert!(!state.history_loading);
         assert_eq!(state.messages.len(), 1);
+    }
+
+    #[test]
+    fn deleting_chat_clears_messages_but_keeps_contact_selection() {
+        let mut state = UiState::from_profiles(vec!["alice".to_owned()]);
+        state.contact_bundle = "peer".to_owned();
+        state.conversation_selected = true;
+        state.messages.push(ConversationMessage {
+            sender: "You".to_owned(),
+            text: "hello".to_owned(),
+            timestamp: 0,
+            outgoing: true,
+            status: "sent".to_owned(),
+            ciphertext: String::new(),
+        });
+
+        state.prepare(&Command::DeleteHistory {
+            peer: "peer".to_owned(),
+        });
+        assert!(state.history_loading);
+        assert_eq!(state.loading_text, "Deleting chat history…");
+
+        state.apply(&Event::ChatUpdated {
+            messages: Vec::new(),
+            status: "Chat history deleted.".to_owned(),
+            history_cursor: 0,
+            has_more: false,
+            prepend: false,
+        });
+        assert!(state.messages.is_empty());
+        assert!(state.conversation_selected);
+        assert_eq!(state.contact_bundle, "peer");
+        assert!(!state.chat_loading);
     }
 }

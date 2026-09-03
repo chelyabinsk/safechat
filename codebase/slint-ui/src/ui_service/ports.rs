@@ -33,6 +33,9 @@ pub trait ProfileStore: Send + Sync {
 pub trait HistoryStore: Send + Sync {
     fn load(&self, profile: &str, password: &str, peer: &str) -> Result<HistoryFile>;
     fn save(&self, profile: &str, password: &str, peer: &str, history: &HistoryFile) -> Result<()>;
+    fn delete(&self, profile: &str, password: &str, peer: &str) -> Result<()> {
+        self.save(profile, password, peer, &HistoryFile::empty())
+    }
 
     fn load_page(
         &self,

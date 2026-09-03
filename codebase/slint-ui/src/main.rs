@@ -81,6 +81,7 @@ fn to_slint_message(message: ui_service::ConversationMessage, locale: &UiText) -
 fn localize_loading_text(loading: &str, locale: &UiText) -> String {
     match loading {
         "Decrypting chat history…" => locale.decrypting_chat_history.to_string(),
+        "Deleting chat history…" => locale.deleting_chat_history.to_string(),
         "Encrypting and sending…" => locale.encrypting_sending.to_string(),
         "Decrypting pasted message…" => locale.decrypting_pasted.to_string(),
         _ => loading.to_owned(),
@@ -262,6 +263,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let window = MainWindow::new()?;
     configure_window(&window);
+    window.set_app_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
+    if let Ok(data_directory) = ui_service::data_directory() {
+        window.set_data_directory(data_directory.to_string_lossy().into_owned().into());
+    }
     let service = Arc::new(UiService::new_with_debug(cli.debug));
     let profiles = service
         .available_profiles()
@@ -453,6 +458,31 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let window_weak = window.as_weak();
+    let service_for_delete = Arc::clone(&service);
+    let state_for_delete = Rc::clone(&state);
+    let options_for_delete = transport_options.clone();
+    window.on_delete_chat(move || {
+        let snapshot = state_for_delete.borrow().clone();
+        if snapshot.contact_bundle.is_empty() || snapshot.chat_loading {
+            return;
+        }
+        let command = Command::DeleteHistory {
+            peer: snapshot.contact_bundle,
+        };
+        state_for_delete.borrow_mut().prepare(&command);
+        if let Some(window) = window_weak.upgrade() {
+            render_state(&window, &state_for_delete.borrow(), &options_for_delete);
+            if let Err(error) = service_for_delete.submit(command) {
+                let mut state = state_for_delete.borrow_mut();
+                state.status = format!("Could not delete chat: {error}");
+                state.chat_loading = false;
+                state.history_loading = false;
+                render_state(&window, &state, &options_for_delete);
+            }
+        }
+    });
+
+    let window_weak = window.as_weak();
     let service_for_older = Arc::clone(&service);
     let state_for_older = Rc::clone(&state);
     let options_for_older = transport_options.clone();
@@ -621,6 +651,7 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_new_chat(move || {
         state_for_new_chat.borrow_mut().new_chat_open = true;
         if let Some(window) = window_weak.upgrade() {
+            window.set_delete_chat_confirm_open(false);
             render_state(&window, &state_for_new_chat.borrow(), &options_for_new_chat);
         }
     });
