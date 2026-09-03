@@ -163,6 +163,13 @@ impl UiState {
                 self.chat_loading = false;
                 self.history_loading = false;
                 self.status = status.clone();
+                if status == "Chat history deleted." {
+                    self.contact_name.clear();
+                    self.contact_bundle.clear();
+                    self.contact_added = false;
+                    self.conversation_selected = false;
+                    self.new_chat_open = false;
+                }
             }
             Event::Error { operation, message } => {
                 self.chat_loading = false;
@@ -276,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_chat_clears_messages_but_keeps_contact_selection() {
+    fn deleting_chat_clears_messages_and_removes_contact_from_ui() {
         let mut state = UiState::from_profiles(vec!["alice".to_owned()]);
         state.contact_bundle = "peer".to_owned();
         state.conversation_selected = true;
@@ -303,8 +310,9 @@ mod tests {
             prepend: false,
         });
         assert!(state.messages.is_empty());
-        assert!(state.conversation_selected);
-        assert_eq!(state.contact_bundle, "peer");
+        assert!(!state.conversation_selected);
+        assert!(!state.contact_added);
+        assert!(state.contact_bundle.is_empty());
         assert!(!state.chat_loading);
     }
 }

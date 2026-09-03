@@ -1,4 +1,4 @@
-import { ComboBox, GroupBox, HorizontalBox, LineEdit, ListView, Palette, VerticalBox } from "std-widgets.slint";
+import { ComboBox, GroupBox, HorizontalBox, LineEdit, ListView, Palette, TextEdit, VerticalBox } from "std-widgets.slint";
 
 component AppButton inherits Rectangle {
     in property <string> label;
@@ -201,6 +201,9 @@ export struct UiText {
     copy-bundle: string,
     close: string,
     data-location: string,
+    open-data-directory: string,
+    open-profile-directory: string,
+    open-chat-history-directory: string,
     delete-chat: string,
     delete-chat-confirmation: string,
     chat-deleted: string,
@@ -258,7 +261,10 @@ export component MainWindow inherits Window {
     in-out property <bool> new-chat-open: false;
     in-out property <bool> profile-info-open: false;
     in-out property <string> data-directory: "";
+    in-out property <string> profile-directory: "";
+    in-out property <string> chat-history-path: "";
     in-out property <bool> delete-chat-confirm-open: false;
+    in-out property <bool> chat-context-open: false;
     in-out property <bool> history-has-more: false;
     in-out property <int> scroll-generation: 0;
     in-out property <string> copied-ciphertext: "";
@@ -292,6 +298,9 @@ export component MainWindow inherits Window {
     callback copy-ciphertext(string);
     callback load-older-history();
     callback delete-chat();
+    callback open-data-directory();
+    callback open-profile-directory();
+    callback open-chat-history-directory();
 
     Rectangle {
         width: parent.width;
@@ -388,12 +397,18 @@ export component MainWindow inherits Window {
                         label: "＋  " + root.locale.new-conversation;
                         primary: true;
                         height: 42px;
-                        clicked => { root.new-chat(); }
+                        clicked => { root.chat-context-open = false; root.delete-chat-confirm-open = false; root.new-chat(); }
                         }
                         if root.contact-added: TouchArea {
                             height: 76px;
                             enabled: !root.chat-loading;
-                            clicked => { root.select-contact(); }
+                            clicked => { root.chat-context-open = false; root.delete-chat-confirm-open = false; root.select-contact(); }
+                            pointer-event(event) => {
+                                if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
+                                    root.chat-context-open = !root.chat-context-open;
+                                    root.delete-chat-confirm-open = false;
+                                }
+                            }
                             Rectangle {
                                 background: root.conversation-selected && !root.new-chat-open ? (root.dark-theme ? #24554c : #dff3ee) : (root.dark-theme ? #22312e : #f3f6f5);
                                 border-radius: 10px;
@@ -405,6 +420,35 @@ export component MainWindow inherits Window {
                                     spacing: 3px;
                                     Text { text: root.contact-name; font-size: 16px; color: root.primary-text; font-weight: 600; }
                                     Text { text: root.locale.verified-contact; color: root.secondary-text; font-size: 12px; }
+                                }
+                            }
+                        }
+                        if root.chat-context-open: Rectangle {
+                            width: 250px;
+                            height: menu_content.preferred-height;
+                            background: root.elevated-background;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: root.input-border;
+                            z: 20;
+                            menu_content := VerticalBox {
+                                padding: 10px;
+                                spacing: 6px;
+                                if !root.delete-chat-confirm-open: AppButton {
+                                    label: root.locale.open-chat-history-directory;
+                                    height: 34px;
+                                    clicked => { root.open-chat-history-directory(); root.chat-context-open = false; }
+                                }
+                                if !root.delete-chat-confirm-open: AppButton {
+                                    label: root.locale.delete-chat;
+                                    height: 34px;
+                                    clicked => { root.delete-chat-confirm-open = true; }
+                                }
+                                if root.delete-chat-confirm-open: Text { text: root.locale.delete-chat-confirmation; color: root.primary-text; wrap: word-wrap; }
+                                if root.delete-chat-confirm-open: HorizontalBox {
+                                    spacing: 6px;
+                                    AppButton { label: root.locale.delete-chat; primary: true; clicked => { root.delete-chat(); root.delete-chat-confirm-open = false; root.chat-context-open = false; } }
+                                    AppButton { label: root.locale.close; clicked => { root.delete-chat-confirm-open = false; } }
                                 }
                             }
                         }
@@ -511,15 +555,22 @@ export component MainWindow inherits Window {
                             horizontal-alignment: center;
                         }
                         if root.conversation-selected && !root.new-chat-open && !root.chat-loading: HorizontalBox {
-                            height: 40px;
+                            height: 60px;
                             spacing: 8px;
-                            message_input := LineEdit {
+                            message_input := TextEdit {
                                 placeholder-text: root.locale.type-message;
                                 horizontal-stretch: 1;
-                                height: 40px;
+                                height: 60px;
                                 enabled: root.profile-ready;
+                                key-pressed(event) => {
+                                    if event.text == Key.Return && !event.modifiers.shift {
+                                        root.send-message(message_input.text);
+                                        message_input.text = "";
+                                        accept;
+                                    }
+                                    reject;
+                                }
                             }
-                            AppButton { label: root.locale.send; primary: true; width: 84px; height: 40px; enabled: root.profile-ready; clicked => { root.send-message(message_input.text); message_input.text = ""; } }
                         }
                         if root.conversation-selected && !root.new-chat-open && !root.chat-loading && root.selected-transport == root.locale.copy-paste: HorizontalBox {
                             height: 40px;
@@ -528,13 +579,10 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 40px;
                                 enabled: root.profile-ready;
-                            }
-                            AppButton {
-                                label: root.locale.receive-pasted;
-                                height: 40px;
-                                width: 142px;
-                                enabled: root.profile-ready;
-                                clicked => { root.receive-pasted(paste_input.text); paste_input.text = ""; }
+                                accepted(text) => {
+                                    root.receive-pasted(text);
+                                    paste_input.text = "";
+                                }
                             }
                         }
                     }
@@ -654,7 +702,7 @@ export component MainWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 width: 480px;
-                height: 430px;
+                height: 460px;
                 background: root.elevated-background;
                 border-radius: 16px;
                 border-width: 1px;
@@ -671,21 +719,9 @@ export component MainWindow inherits Window {
                         Text { text: root.fingerprint; font-size: 20px; color: root.primary-text; wrap: char-wrap; width: 424px; horizontal-alignment: center; }
                     }
                     Text { text: root.locale.share-bundle; color: root.secondary-text; wrap: word-wrap; }
-                    Text { text: root.locale.data-location + ":"; color: root.secondary-text; }
-                    Text { text: root.data-directory; color: root.primary-text; wrap: char-wrap; width: 424px; }
-                    if root.conversation-selected && !root.delete-chat-confirm-open: AppButton {
-                        label: root.locale.delete-chat;
-                        clicked => { root.delete-chat-confirm-open = true; }
-                    }
-                    if root.delete-chat-confirm-open: Text {
-                        text: root.locale.delete-chat-confirmation;
-                        color: root.primary-text;
-                    }
-                    if root.delete-chat-confirm-open: HorizontalBox {
-                        spacing: 8px;
-                        AppButton { label: root.locale.delete-chat; primary: true; clicked => { root.delete-chat(); root.delete-chat-confirm-open = false; root.profile-info-open = false; } }
-                        AppButton { label: root.locale.close; clicked => { root.delete-chat-confirm-open = false; } }
-                    }
+                    Text { text: root.locale.data-location; color: root.secondary-text; }
+                    AppButton { label: root.locale.open-data-directory; clicked => { root.open-data-directory(); } }
+                    AppButton { label: root.locale.open-profile-directory; clicked => { root.open-profile-directory(); } }
                     HorizontalBox {
                         spacing: 8px;
                         AppButton { label: root.locale.copy-bundle; primary: true; clicked => { root.copy-bundle(); } }
@@ -694,5 +730,6 @@ export component MainWindow inherits Window {
                 }
             }
         }
+
     }
 }

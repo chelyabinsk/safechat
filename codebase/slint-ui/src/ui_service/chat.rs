@@ -18,6 +18,10 @@ use super::profile::{peer_bundle_from_encoded, profile_database};
 
 pub(super) const HISTORY_PAGE_SIZE: usize = 40;
 
+pub(super) fn conversation_id(encoded_peer: &str) -> Result<String> {
+    Ok(peer_bundle_from_encoded(encoded_peer)?.address().to_string())
+}
+
 pub(super) struct HistoryPage {
     pub messages: Vec<ConversationMessage>,
     pub cursor: usize,
@@ -226,11 +230,11 @@ pub(super) fn load_chat_history(
     encoded_peer: &str,
     history_store: &dyn HistoryStorePort,
 ) -> Result<HistoryPage> {
-    let peer = peer_bundle_from_encoded(encoded_peer)?;
+    let conversation = conversation_id(encoded_peer)?;
     let page = history_store.load_page(
         &session.profile,
         &session.password,
-        &peer.address().to_string(),
+        &conversation,
         None,
         HISTORY_PAGE_SIZE,
     )?;
@@ -243,11 +247,11 @@ pub(super) fn load_older_chat_history(
     before: usize,
     history_store: &dyn HistoryStorePort,
 ) -> Result<HistoryPage> {
-    let peer = peer_bundle_from_encoded(encoded_peer)?;
+    let conversation = conversation_id(encoded_peer)?;
     let page = history_store.load_page(
         &session.profile,
         &session.password,
-        &peer.address().to_string(),
+        &conversation,
         Some(before),
         HISTORY_PAGE_SIZE,
     )?;

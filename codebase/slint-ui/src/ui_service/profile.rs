@@ -77,32 +77,67 @@ pub(super) fn profile_database(profile: &str) -> Result<PathBuf> {
     Ok(root.join("identity.db"))
 }
 
-pub(super) fn load_language(profile: &str) -> Result<Option<String>> {
-    let database = profile_database(profile)?;
-    let path = database
+pub fn profile_directory(profile: &str) -> Result<PathBuf> {
+    profile_database(profile)?
         .parent()
-        .context("profile database has no parent directory")?
-        .join("preferences.json");
+        .map(PathBuf::from)
+        .context("profile database has no parent directory")
+}
+
+pub fn chat_history_file(profile: &str, peer: &str) -> Result<PathBuf> {
+    let component = peer
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    Ok(profile_directory(profile)?
+        .join("lobbies")
+        .join(format!("{component}.age")))
+}
+
+fn preferences_path(profile: &str) -> Result<PathBuf> {
+    Ok(profile_directory(profile)?.join("preferences.json"))
+}
+
+fn load_preferences(profile: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let path = preferences_path(profile)?;
     if !path.is_file() {
-        return Ok(None);
+        return Ok(serde_json::Map::new());
     }
     let contents = std::fs::read_to_string(path)?;
-    let preferences: serde_json::Value = serde_json::from_str(&contents)?;
-    Ok(preferences
+    Ok(serde_json::from_str::<serde_json::Value>(&contents)?
+        .as_object()
+        .cloned()
+        .unwrap_or_default())
+}
+
+fn save_preferences(
+    profile: &str,
+    preferences: serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    std::fs::write(
+        preferences_path(profile)?,
+        serde_json::Value::Object(preferences).to_string(),
+    )?;
+    Ok(())
+}
+
+pub(super) fn load_language(profile: &str) -> Result<Option<String>> {
+    Ok(load_preferences(profile)?
         .get("language")
         .and_then(|value| value.as_str())
         .map(str::to_owned))
 }
 
 pub(super) fn save_language(profile: &str, language: &str) -> Result<()> {
-    let database = profile_database(profile)?;
-    let path = database
-        .parent()
-        .context("profile database has no parent directory")?
-        .join("preferences.json");
-    let contents = serde_json::json!({ "language": language }).to_string();
-    std::fs::write(path, contents)?;
-    Ok(())
+    let mut preferences = load_preferences(profile)?;
+    preferences.insert("language".to_owned(), language.into());
+    save_preferences(profile, preferences)
 }
 
 pub(super) fn validate_profile_name(profile: &str) -> Result<&str> {

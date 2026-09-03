@@ -9,6 +9,8 @@ use safechat_slint_ui::ui_service::{
     Command, Event, UiService, UiState, load_profile_language, save_profile_language,
 };
 use std::cell::RefCell;
+use std::path::Path;
+use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,6 +36,26 @@ fn configure_window(window: &MainWindow) {
     window
         .window()
         .set_size(slint::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+}
+
+fn open_directory(path: &Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err(format!("folder does not exist: {}", path.display()));
+    }
+    #[cfg(target_os = "linux")]
+    let status = ProcessCommand::new("xdg-open").arg(path).status();
+    #[cfg(target_os = "macos")]
+    let status = ProcessCommand::new("open").arg(path).status();
+    #[cfg(target_os = "windows")]
+    let status = ProcessCommand::new("explorer").arg(path).status();
+    status
+        .map_err(|error| error.to_string())
+        .and_then(|status| {
+            status
+                .success()
+                .then_some(())
+                .ok_or_else(|| format!("file manager exited with {status}"))
+        })
 }
 
 fn format_timestamp(timestamp: u64, locale: &UiText) -> String {
@@ -109,6 +131,18 @@ fn render_state(window: &MainWindow, state: &UiState, transport_options: &[Strin
             .collect::<Vec<_>>(),
     )));
     window.set_profile_name(state.profile_name.clone().into());
+    let profile_directory = ui_service::profile_directory(&state.profile_name)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let chat_history_path = if state.conversation_selected && !state.contact_bundle.is_empty() {
+        ui_service::chat_history_file(&state.profile_name, &state.contact_bundle)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    window.set_profile_directory(profile_directory.into());
+    window.set_chat_history_path(chat_history_path.into());
     window.set_selected_profile(state.selected_profile.clone().into());
     window.set_profile_exists(state.profile_exists);
     window.set_creating_profile(state.creating_profile);
@@ -479,6 +513,74 @@ fn main() -> Result<(), slint::PlatformError> {
                 state.history_loading = false;
                 render_state(&window, &state, &options_for_delete);
             }
+        }
+    });
+
+    let window_weak = window.as_weak();
+    let state_for_data_directory = Rc::clone(&state);
+    let options_for_data_directory = transport_options.clone();
+    window.on_open_data_directory(move || {
+        let result = ui_service::data_directory()
+            .map_err(|error| error.to_string())
+            .and_then(|path| open_directory(&path));
+        if let Some(window) = window_weak.upgrade() {
+            if let Err(error) = result {
+                state_for_data_directory.borrow_mut().status =
+                    format!("Could not open folder: {error}");
+            }
+            render_state(
+                &window,
+                &state_for_data_directory.borrow(),
+                &options_for_data_directory,
+            );
+        }
+    });
+
+    let window_weak = window.as_weak();
+    let state_for_profile_directory = Rc::clone(&state);
+    let options_for_profile_directory = transport_options.clone();
+    window.on_open_profile_directory(move || {
+        let profile = state_for_profile_directory.borrow().profile_name.clone();
+        let result = ui_service::profile_directory(&profile)
+            .map_err(|error| error.to_string())
+            .and_then(|path| open_directory(&path));
+        if let Some(window) = window_weak.upgrade() {
+            if let Err(error) = result {
+                state_for_profile_directory.borrow_mut().status =
+                    format!("Could not open folder: {error}");
+            }
+            render_state(
+                &window,
+                &state_for_profile_directory.borrow(),
+                &options_for_profile_directory,
+            );
+        }
+    });
+
+    let window_weak = window.as_weak();
+    let state_for_history_directory = Rc::clone(&state);
+    let options_for_history_directory = transport_options.clone();
+    window.on_open_chat_history_directory(move || {
+        let snapshot = state_for_history_directory.borrow().clone();
+        let result =
+            ui_service::chat_history_file(&snapshot.profile_name, &snapshot.contact_bundle)
+                .map_err(|error| error.to_string())
+                .and_then(|path| {
+                    path.parent()
+                        .map(Path::to_path_buf)
+                        .ok_or_else(|| "chat history has no parent folder".to_owned())
+                })
+                .and_then(|path| open_directory(&path));
+        if let Some(window) = window_weak.upgrade() {
+            if let Err(error) = result {
+                state_for_history_directory.borrow_mut().status =
+                    format!("Could not open folder: {error}");
+            }
+            render_state(
+                &window,
+                &state_for_history_directory.borrow(),
+                &options_for_history_directory,
+            );
         }
     });
 

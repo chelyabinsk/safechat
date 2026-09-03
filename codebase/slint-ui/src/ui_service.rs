@@ -41,6 +41,14 @@ pub fn data_directory() -> anyhow::Result<std::path::PathBuf> {
     profile::data_directory()
 }
 
+pub fn profile_directory(profile: &str) -> anyhow::Result<std::path::PathBuf> {
+    profile::profile_directory(profile)
+}
+
+pub fn chat_history_file(profile: &str, peer: &str) -> anyhow::Result<std::path::PathBuf> {
+    profile::chat_history_file(profile, peer)
+}
+
 pub(super) fn handle_command(
     session: &mut Option<ProfileSession>,
     command: Command,
@@ -123,9 +131,10 @@ pub(super) fn handle_command(
             }),
         Command::DeleteHistory { peer } => require_session(session)
             .and_then(|active| {
+                let peer_address = chat::conversation_id(&peer)?;
                 ports
                     .history
-                    .delete(&active.profile, &active.password, &peer)
+                    .delete(&active.profile, &active.password, &peer_address)
             })
             .map(|()| {
                 Some(Event::ChatUpdated {
